@@ -38,7 +38,7 @@ class SpikeSortingPipeline:
         else:
             return d, None, None
 
-    def train(self, d, index, classes, detection_threshold=5.0, tolerance=50):
+    def train(self, d, index, classes, voltage_threshold=0.75, tolerance=50):
         """
         Train the pipeline on labeled data.
 
@@ -54,8 +54,8 @@ class SpikeSortingPipeline:
             Ground truth spike indices (1-indexed)
         classes : np.ndarray
             Ground truth class labels
-        detection_threshold : float
-            Threshold factor for spike detection
+        voltage_threshold : float
+            Fixed voltage threshold for spike detection
         tolerance : int
             Maximum deviation for matching detected to ground truth spikes
         """
@@ -81,10 +81,10 @@ class SpikeSortingPipeline:
         self.feature_extractor.fit(gt_waveforms)
 
         # Phase 2: Detect spikes and match to ground truth
-        print(f"\nDetecting spikes (threshold={detection_threshold})...")
+        print(f"\nDetecting spikes (voltage_threshold={voltage_threshold})...")
         from spike_detector import detect_spikes
         detected_indices, detected_waveforms = detect_spikes(
-            d, threshold_factor=detection_threshold,
+            d, voltage_threshold=voltage_threshold,
             window_before=self.window_before,
             window_after=self.window_after
         )
@@ -161,7 +161,7 @@ class SpikeSortingPipeline:
 
         return self
 
-    def predict(self, d, use_matched_filter=False, threshold_factor=4.0):
+    def predict(self, d, use_matched_filter=False, threshold_factor=None, voltage_threshold=None):
         """
         Detect and classify spikes in new data.
 
@@ -171,8 +171,10 @@ class SpikeSortingPipeline:
             Raw signal
         use_matched_filter : bool
             Use matched filtering for detection (better for low SNR)
-        threshold_factor : float
-            Detection threshold multiplier
+        threshold_factor : float or None
+            Detection threshold multiplier (MAD-based)
+        voltage_threshold : float or None
+            Fixed voltage threshold (overrides threshold_factor)
 
         Returns:
         --------
@@ -189,13 +191,15 @@ class SpikeSortingPipeline:
         if use_matched_filter and self.templates:
             indices, waveforms = detect_spikes_matched_filter(
                 d, self.templates,
-                threshold_factor=threshold_factor,
+                threshold_factor=threshold_factor if threshold_factor else 4.0,
                 window_before=self.window_before,
                 window_after=self.window_after
             )
         else:
             indices, waveforms = detect_spikes(
-                d, threshold_factor=threshold_factor,
+                d,
+                threshold_factor=threshold_factor,
+                voltage_threshold=voltage_threshold,
                 window_before=self.window_before,
                 window_after=self.window_after
             )
@@ -255,13 +259,13 @@ class SpikeSortingPipeline:
 
         return {'precision': precision, 'recall': recall, 'f1': f1, 'matched_true': matched_true}
 
-    def evaluate_full(self, d, true_indices, true_classes, tolerance=50, threshold_factor=4.0):
+    def evaluate_full(self, d, true_indices, true_classes, tolerance=50, voltage_threshold=0.75):
         """
         Full evaluation: detection + classification.
         Returns combined F1 score as per coursework criteria.
         """
         # Predict
-        pred_indices, pred_classes = self.predict(d, threshold_factor=threshold_factor)
+        pred_indices, pred_classes = self.predict(d, voltage_threshold=voltage_threshold)
 
         # Detection evaluation
         det_results = self.evaluate_detection(pred_indices, true_indices, tolerance)

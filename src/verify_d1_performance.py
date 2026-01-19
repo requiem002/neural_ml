@@ -72,9 +72,9 @@ def evaluate_dataset(dataset_name, has_ground_truth=True):
         true_index = None
         true_class = None
 
-    # Run prediction
+    # Run prediction with optimized threshold
     print("Running prediction...")
-    pred_index, pred_class = pipeline.predict(d, threshold_factor=5.0)
+    pred_index, pred_class = pipeline.predict(d, threshold_factor=7.5)
     print(f"Detected spikes: {len(pred_index)}")
 
     if not has_ground_truth:

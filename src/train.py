@@ -35,7 +35,7 @@ def main():
     print("\n" + "="*50)
     print("FULL EVALUATION ON D1 (Training Data)")
     print("="*50)
-    results = pipeline.evaluate_full(d, index, classes, threshold_factor=5.0)
+    results = pipeline.evaluate_full(d, index, classes, voltage_threshold=0.75)
 
     # Save trained model
     pipeline.save(model_dir / 'spike_sorter.pkl')

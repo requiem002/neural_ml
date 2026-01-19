@@ -4,10 +4,10 @@ import numpy as np
 from scipy import signal
 
 
-def detect_spikes(data, sample_rate=25000, threshold_factor=4.0, min_spike_distance=30,
-                  window_before=30, window_after=30, refine_peak=True):
+def detect_spikes(data, sample_rate=25000, threshold_factor=None, voltage_threshold=None,
+                  min_spike_distance=30, window_before=30, window_after=30, refine_peak=True):
     """
-    Detect spikes in neural recording using adaptive threshold.
+    Detect spikes in neural recording.
 
     Parameters:
     -----------
@@ -15,8 +15,10 @@ def detect_spikes(data, sample_rate=25000, threshold_factor=4.0, min_spike_dista
         Raw signal (1D array)
     sample_rate : int
         Sampling rate in Hz
-    threshold_factor : float
-        Multiplier for MAD-based threshold
+    threshold_factor : float or None
+        Multiplier for MAD-based threshold (if voltage_threshold not provided)
+    voltage_threshold : float or None
+        Fixed voltage threshold (overrides threshold_factor if provided)
     min_spike_distance : int
         Minimum samples between spikes (refractory period)
     window_before : int
@@ -40,18 +42,24 @@ def detect_spikes(data, sample_rate=25000, threshold_factor=4.0, min_spike_dista
     b, a = signal.butter(3, [low, high], btype='band')
     filtered = signal.filtfilt(b, a, data)
 
-    # Adaptive threshold using Median Absolute Deviation (robust to outliers)
-    # MAD-based noise estimation: sigma = MAD / 0.6745
-    mad = np.median(np.abs(filtered - np.median(filtered)))
-    sigma = mad / 0.6745
-    threshold = threshold_factor * sigma
+    # Determine threshold
+    if voltage_threshold is not None:
+        # Use fixed voltage threshold (recommended for cross-dataset consistency)
+        threshold = voltage_threshold
+    else:
+        # Fall back to MAD-based adaptive threshold
+        if threshold_factor is None:
+            threshold_factor = 5.0  # Default
+        mad = np.median(np.abs(filtered - np.median(filtered)))
+        sigma = mad / 0.6745
+        threshold = threshold_factor * sigma
 
     # Find peaks above threshold
     peaks, properties = signal.find_peaks(
         filtered,
         height=threshold,
         distance=min_spike_distance,
-        prominence=threshold * 0.5  # Require some prominence to avoid noise
+        prominence=threshold * 0.3  # Lower prominence for better recall
     )
 
     # Extract waveforms and refine peak locations
@@ -71,15 +79,8 @@ def detect_spikes(data, sample_rate=25000, threshold_factor=4.0, min_spike_dista
 
         if start >= 0 and end <= len(data):
             waveform = data[start:end]
-
-            # Additional validation: check waveform has spike-like characteristics
-            peak_val = np.max(waveform)
-            baseline = np.mean(waveform[:5])  # First 5 samples as baseline
-
-            # Spike should have significant amplitude above baseline
-            if peak_val - baseline > threshold * 0.3:
-                waveforms.append(waveform)
-                valid_peaks.append(peak + 1)  # 1-indexed for MATLAB
+            waveforms.append(waveform)
+            valid_peaks.append(peak + 1)  # 1-indexed for MATLAB
 
     spike_indices = np.array(valid_peaks, dtype=np.int64)
     spike_waveforms = np.array(waveforms) if waveforms else np.empty((0, window_before + window_after))
