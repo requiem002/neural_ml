@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a **neural spike sorting and classification** project (EE40098 Coursework C). The goal is to detect and classify neuronal action potentials (spikes) from simulated brain recordings into 5 neuron classes.
+This is a **neural spike sorting and classification** project (EE40098 Coursework C). The goal is to detect and classify neuronal action potentials (spikes) from simulated brain recordings into 5 neuron classes. Please refer to the "EE40098 CourseWork C Assessment brief" pdf document for more information.
 
-**Key challenge:** Build a system robust to decreasing signal-to-noise ratios (80dB to <0dB).
+**Key challenge:** Build a system robust to decreasing signal-to-noise ratios (80dB to <0dB). This is particularly important in datasets 5 and 6, which have the lowest SNRs. 
 
 ## Datasets
 
@@ -42,7 +42,7 @@ For each test dataset (D2-D6), produce a .mat file containing:
 - `Index` - Detected spike locations (sample indices)
 - `Class` - Predicted neuron class (1-5) for each spike
 
-Package predictions in ZIP files for submission.
+Package predictions in one file named "submissions", and each of the .mat files must be labelled as "d2.mat, d3.mat" through to "d6.mat".
 
 ## Python Dependencies (Expected)
 

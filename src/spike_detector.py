@@ -123,16 +123,31 @@ def detect_spikes_adaptive(data, sample_rate=25000, min_spike_distance=30,
 
 
 def detect_spikes_matched_filter(data, templates, sample_rate=25000,
-                                  threshold_factor=4.0, min_spike_distance=30,
-                                  window_before=30, window_after=30):
+                                  threshold_factor=4.0, correlation_threshold=None,
+                                  min_spike_distance=30, window_before=30, window_after=30):
     """
     Detect spikes using matched filtering with known templates.
     Better for low SNR conditions.
 
     Parameters:
     -----------
+    data : np.ndarray
+        Raw signal (1D array)
     templates : dict
         Dictionary mapping class -> average waveform template
+    sample_rate : int
+        Sampling rate in Hz
+    threshold_factor : float
+        Multiplier for MAD-based threshold (fallback if correlation_threshold not set)
+    correlation_threshold : float or None
+        Fixed correlation threshold (0-1 range, recommended 0.3-0.6)
+        If provided, overrides threshold_factor
+    min_spike_distance : int
+        Minimum samples between spikes
+    window_before : int
+        Samples before peak for waveform extraction
+    window_after : int
+        Samples after peak for waveform extraction
     """
     nyquist = sample_rate / 2
     low = 300 / nyquist
@@ -140,30 +155,43 @@ def detect_spikes_matched_filter(data, templates, sample_rate=25000,
     b, a = signal.butter(3, [low, high], btype='band')
     filtered = signal.filtfilt(b, a, data)
 
-    # Compute correlation with each template
+    # Compute NORMALIZED correlation with each template
     correlations = []
     for cls, template in templates.items():
-        # Normalize template
+        # Normalize template to unit energy
         template_norm = (template - np.mean(template)) / (np.std(template) + 1e-10)
-        # Correlate
-        corr = signal.correlate(filtered, template_norm, mode='same')
+
+        # Compute normalized cross-correlation using sliding window
+        # For proper normalized correlation, we need to normalize each window of the signal too
+        corr = compute_normalized_correlation(filtered, template_norm)
         correlations.append(corr)
 
     # Take maximum correlation across templates
     max_corr = np.max(correlations, axis=0)
 
-    # Threshold based on correlation statistics
-    mad = np.median(np.abs(max_corr - np.median(max_corr)))
-    sigma = mad / 0.6745
-    threshold = threshold_factor * sigma
+    # Determine threshold
+    if correlation_threshold is not None:
+        # Use fixed correlation threshold (value between 0-1)
+        threshold = correlation_threshold
+    else:
+        # Fall back to MAD-based threshold on correlation values
+        mad = np.median(np.abs(max_corr - np.median(max_corr)))
+        sigma = mad / 0.6745
+        threshold = threshold_factor * sigma
 
     peaks, _ = signal.find_peaks(max_corr, height=threshold, distance=min_spike_distance)
 
-    # Extract waveforms
+    # Extract waveforms from ORIGINAL (unfiltered) data
     valid_peaks = []
     waveforms = []
 
     for peak in peaks:
+        # Refine peak location in original signal
+        search_start = max(0, peak - 10)
+        search_end = min(len(data), peak + 10)
+        local_max_idx = search_start + np.argmax(data[search_start:search_end])
+        peak = local_max_idx
+
         start = peak - window_before
         end = peak + window_after
 
@@ -172,4 +200,54 @@ def detect_spikes_matched_filter(data, templates, sample_rate=25000,
             waveforms.append(waveform)
             valid_peaks.append(peak + 1)
 
-    return np.array(valid_peaks, dtype=np.int64), np.array(waveforms)
+    return np.array(valid_peaks, dtype=np.int64), np.array(waveforms) if waveforms else np.empty((0, window_before + window_after))
+
+
+def compute_normalized_correlation(signal_data, template):
+    """
+    Compute normalized cross-correlation between signal and template.
+    Returns correlation values in range [-1, 1].
+
+    Parameters:
+    -----------
+    signal_data : np.ndarray
+        The signal to search in
+    template : np.ndarray
+        The normalized template to match
+
+    Returns:
+    --------
+    corr : np.ndarray
+        Normalized correlation at each position
+    """
+    n = len(template)
+    result = np.zeros(len(signal_data))
+
+    # Use scipy correlate for speed, then normalize
+    raw_corr = signal.correlate(signal_data, template, mode='same')
+
+    # Compute local standard deviation for normalization
+    # Use cumsum trick for efficient computation
+    signal_sq = signal_data ** 2
+    cumsum = np.cumsum(signal_data)
+    cumsum_sq = np.cumsum(signal_sq)
+
+    # Pad for edge handling
+    half_n = n // 2
+
+    for i in range(half_n, len(signal_data) - half_n):
+        start = i - half_n
+        end = i + half_n + (n % 2)  # Handle odd template lengths
+
+        # Local mean and std
+        local_sum = cumsum[end] - (cumsum[start] if start > 0 else 0)
+        local_sum_sq = cumsum_sq[end] - (cumsum_sq[start] if start > 0 else 0)
+
+        local_mean = local_sum / n
+        local_var = local_sum_sq / n - local_mean ** 2
+        local_std = np.sqrt(max(local_var, 1e-10))
+
+        # Normalize
+        result[i] = raw_corr[i] / (n * local_std + 1e-10)
+
+    return result

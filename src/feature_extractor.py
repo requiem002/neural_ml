@@ -1,6 +1,7 @@
 """Feature extraction module for spike classification."""
 
 import numpy as np
+from scipy import signal
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 
@@ -118,32 +119,96 @@ class FeatureExtractor:
 
     def fit(self, waveforms):
         """Fit the feature extractor on training waveforms."""
-        # Fit waveform scaler
-        self.waveform_scaler = StandardScaler()
-        waveforms_scaled = self.waveform_scaler.fit_transform(waveforms)
+        # Normalize waveforms for shape-based features (uses filtering internally)
+        waveforms_norm = self.normalize_waveforms(waveforms)
 
-        # Fit PCA on scaled waveforms
+        # Fit waveform scaler on normalized waveforms
+        self.waveform_scaler = StandardScaler()
+        waveforms_scaled = self.waveform_scaler.fit_transform(waveforms_norm)
+
+        # Fit PCA on scaled normalized waveforms (captures shape, not amplitude)
         self.pca = PCA(n_components=self.n_pca_components)
         self.pca.fit(waveforms_scaled)
 
-        # Extract and fit scaler for handcrafted features
-        handcrafted = self.extract_handcrafted_features(waveforms)
+        # Filter waveforms for handcrafted features (more robust to noise)
+        waveforms_filtered = self.filter_waveforms(waveforms)
+
+        # Extract and fit scaler for handcrafted features (from filtered waveforms)
+        handcrafted = self.extract_handcrafted_features(waveforms_filtered)
         self.scaler = StandardScaler()
         self.scaler.fit(handcrafted)
 
         return self
+
+    def filter_waveforms(self, waveforms, sample_rate=25000):
+        """
+        Apply bandpass filter to waveforms to reduce noise.
+        Spike frequencies are typically 300-3000 Hz.
+        """
+        # Design bandpass filter for spike frequencies
+        nyquist = sample_rate / 2
+        low = 300 / nyquist
+        high = 3000 / nyquist
+
+        # Use gentle filtering to preserve spike shape
+        b, a = signal.butter(2, [low, high], btype='band')
+
+        filtered = []
+        for wf in waveforms:
+            # Apply filter with padding to avoid edge effects
+            try:
+                wf_filt = signal.filtfilt(b, a, wf, padlen=min(15, len(wf)-1))
+            except ValueError:
+                wf_filt = wf  # Fall back to unfiltered if too short
+            filtered.append(wf_filt)
+
+        return np.array(filtered)
+
+    def normalize_waveforms(self, waveforms, filter_first=True):
+        """
+        Normalize waveforms to unit peak amplitude.
+        This helps the classifier focus on shape rather than absolute amplitude.
+        """
+        # Optionally filter to reduce noise before normalization
+        if filter_first:
+            waveforms_clean = self.filter_waveforms(waveforms)
+        else:
+            waveforms_clean = waveforms
+
+        normalized = []
+        for wf, wf_clean in zip(waveforms, waveforms_clean):
+            # Use filtered version for peak finding (more robust to noise)
+            baseline = np.mean(wf_clean[:5])
+            wf_centered = wf - baseline  # Center original waveform
+
+            # Find peak in filtered version
+            peak = np.max(np.abs(wf_clean - baseline))
+            if peak > 0.1:  # Only normalize if there's a clear signal
+                wf_norm = wf_centered / peak
+            else:
+                wf_norm = wf_centered
+
+            normalized.append(wf_norm)
+
+        return np.array(normalized)
 
     def transform(self, waveforms):
         """Transform waveforms to feature vectors."""
         if self.pca is None or self.scaler is None:
             raise ValueError("FeatureExtractor must be fit before transform")
 
-        # PCA features
-        waveforms_scaled = self.waveform_scaler.transform(waveforms)
+        # Normalize waveforms for shape-based features (uses filtering internally)
+        waveforms_norm = self.normalize_waveforms(waveforms)
+
+        # PCA features on normalized waveforms (shape-based)
+        waveforms_scaled = self.waveform_scaler.transform(waveforms_norm)
         pca_features = self.pca.transform(waveforms_scaled)
 
-        # Handcrafted features
-        handcrafted = self.extract_handcrafted_features(waveforms)
+        # Filter waveforms for handcrafted features (more robust to noise)
+        waveforms_filtered = self.filter_waveforms(waveforms)
+
+        # Handcrafted features from FILTERED waveforms (noise-robust)
+        handcrafted = self.extract_handcrafted_features(waveforms_filtered)
         handcrafted_scaled = self.scaler.transform(handcrafted)
 
         # Combine all features

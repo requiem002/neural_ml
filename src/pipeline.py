@@ -129,11 +129,44 @@ class SpikeSortingPipeline:
         augmented_waveforms = []
         augmented_classes = []
 
-        noise_levels = [0.5, 1.0, 2.0, 3.0]  # Different noise levels to simulate varying SNR
+        # Noise levels covering range from D2 to D6
+        # D2: σ=0.23, D3: σ=0.31, D4: σ=0.49, D5: σ=0.92, D6: σ=1.37
+        noise_levels = [0.3, 0.5, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0]
+
+        # Class 3 tends to be over-predicted in noisy conditions because it has
+        # smaller amplitude spikes. We undersample Class 3 augmentations to compensate.
+        # Peer benchmark shows Class 3 should be ~8%, so we aggressively undersample.
+        class3_sample_prob = 0.1  # Only keep 10% of Class 3 augmentations
+
         for noise_level in noise_levels:
             for wf, cls in zip(gt_waveforms, gt_valid_classes):
+                # Undersample Class 3 to reduce bias
+                if cls == 3 and np.random.random() > class3_sample_prob:
+                    continue
+
                 noisy_wf = wf + np.random.randn(len(wf)) * noise_level
                 augmented_waveforms.append(noisy_wf)
+                augmented_classes.append(cls)
+
+        # Also add amplitude-scaled versions to help classifier be invariant to amplitude
+        # This helps prevent Class 3 (smallest amplitude) from being over-predicted
+        print("Adding amplitude-normalized training samples...")
+        for scale in [0.7, 0.85, 1.15, 1.3]:
+            for wf, cls in zip(gt_waveforms, gt_valid_classes):
+                # Undersample Class 3
+                if cls == 3 and np.random.random() > class3_sample_prob:
+                    continue
+
+                # Scale waveform amplitude
+                wf_mean = np.mean(wf[:5])  # baseline
+                wf_centered = wf - wf_mean
+                scaled_wf = wf_centered * scale + wf_mean
+                augmented_waveforms.append(scaled_wf)
+                augmented_classes.append(cls)
+
+                # Also add scaled + noisy version
+                noisy_scaled = scaled_wf + np.random.randn(len(wf)) * 1.0
+                augmented_waveforms.append(noisy_scaled)
                 augmented_classes.append(cls)
 
         augmented_waveforms = np.array(augmented_waveforms)
@@ -161,7 +194,8 @@ class SpikeSortingPipeline:
 
         return self
 
-    def predict(self, d, use_matched_filter=False, threshold_factor=None, voltage_threshold=None):
+    def predict(self, d, use_matched_filter=False, threshold_factor=None,
+                voltage_threshold=None, correlation_threshold=None):
         """
         Detect and classify spikes in new data.
 
@@ -174,7 +208,9 @@ class SpikeSortingPipeline:
         threshold_factor : float or None
             Detection threshold multiplier (MAD-based)
         voltage_threshold : float or None
-            Fixed voltage threshold (overrides threshold_factor)
+            Fixed voltage threshold (overrides threshold_factor) - for standard detection
+        correlation_threshold : float or None
+            Fixed correlation threshold (0-1 range) - for matched filter detection
 
         Returns:
         --------
@@ -192,6 +228,7 @@ class SpikeSortingPipeline:
             indices, waveforms = detect_spikes_matched_filter(
                 d, self.templates,
                 threshold_factor=threshold_factor if threshold_factor else 4.0,
+                correlation_threshold=correlation_threshold,
                 window_before=self.window_before,
                 window_after=self.window_after
             )
