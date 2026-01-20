@@ -9,6 +9,13 @@ from spike_detector import detect_spikes, detect_spikes_matched_filter
 from feature_extractor import FeatureExtractor, extract_waveforms_at_indices
 from classifier import SpikeClassifier, TemplateClassifier
 
+# CNN classifier import (optional - only used when use_cnn=True)
+try:
+    from cnn_experiment import CNNExperiment
+    CNN_AVAILABLE = True
+except ImportError:
+    CNN_AVAILABLE = False
+
 
 class SpikeSortingPipeline:
     """Complete pipeline for spike detection and classification."""
@@ -278,6 +285,44 @@ class SpikeSortingPipeline:
             predicted_classes = self.classifier.predict(X)
 
         return indices, predicted_classes
+
+    def predict_cnn(self, dataset_name, voltage_threshold, verbose=True):
+        """
+        Predict using the CNN classifier.
+
+        Parameters:
+        -----------
+        dataset_name : str
+            Name of the dataset (e.g., 'D2', 'D5')
+        voltage_threshold : float
+            Voltage threshold for spike detection
+        verbose : bool
+            Print progress information
+
+        Returns:
+        --------
+        indices : np.ndarray
+            Detected spike indices
+        classes : np.ndarray
+            Predicted class labels
+        """
+        if not CNN_AVAILABLE:
+            raise ImportError("CNN experiment module not available. "
+                            "Make sure cnn_experiment.py is in the src directory.")
+
+        # Create CNN experiment instance
+        cnn_exp = CNNExperiment()
+        cnn_exp.load_model()
+
+        # Run prediction
+        indices, classes = cnn_exp.predict_dataset(
+            dataset_name,
+            voltage_threshold,
+            verbose=verbose,
+            use_improved_correction=True
+        )
+
+        return indices, classes
 
     def evaluate_detection(self, predicted_indices, true_indices, tolerance=50):
         """

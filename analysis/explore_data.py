@@ -68,7 +68,7 @@ print("\nSaved: class_morphologies.png")
 
 # Plot 2: First 0.5 seconds of raw signal with spike markers
 sample_rate = 25000  # 25 kHz
-duration_samples = int(0.5 * sample_rate)  # 0.5 seconds
+duration_samples = int(2 * sample_rate)  # 0.5 seconds
 
 fig, ax = plt.subplots(figsize=(14, 4))
 
