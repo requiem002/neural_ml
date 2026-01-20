@@ -7,11 +7,11 @@ using the CNN classifier with improved post-processing.
 
 Output Structure:
     submissions/
-    ├── d2.mat  (Index, Class vectors)
-    ├── d3.mat
-    ├── d4.mat
-    ├── d5.mat
-    └── d6.mat
+    ├── D2.mat  (Index, Class as 1xN row vectors - MATLAB compatible)
+    ├── D3.mat
+    ├── D4.mat
+    ├── D5.mat
+    └── D6.mat
 
 Marking Scheme:
     F_Dataset = 0.3 × F_Detection + 0.7 × F_Classification
@@ -82,15 +82,17 @@ def generate_submissions():
             'distribution': Counter(classes) if len(classes) > 0 else {}
         }
 
-        # Save to submission format
-        output_filename = f'd{dataset_name[1]}.mat'  # D2 -> d2.mat
+        # Save to submission format (MATLAB-compatible: 1xN row vectors, uppercase names)
+        output_filename = f'D{dataset_name[1]}.mat'  # D2 -> D2.mat (uppercase!)
         output_path = output_dir / output_filename
 
         if len(indices) > 0:
+            # CRITICAL: Use row vectors (1, N) to match D1.mat format
+            # Index: int32, Class: uint8 (same as D1.mat)
             sio.savemat(str(output_path), {
-                'Index': indices.reshape(-1, 1),
-                'Class': classes.reshape(-1, 1)
-            })
+                'Index': indices.reshape(1, -1).astype(np.int32),
+                'Class': classes.reshape(1, -1).astype(np.uint8)
+            }, do_compression=False)
             print(f"Saved: {output_path}")
         else:
             print(f"WARNING: No spikes detected for {dataset_name}")
@@ -125,7 +127,7 @@ def generate_submissions():
     print("=" * 80)
 
     for dataset_name in ['D2', 'D3', 'D4', 'D5', 'D6']:
-        output_filename = f'd{dataset_name[1]}.mat'
+        output_filename = f'D{dataset_name[1]}.mat'  # Uppercase!
         output_path = output_dir / output_filename
 
         if output_path.exists():
@@ -153,7 +155,7 @@ def verify_submission_format():
     base_dir = Path(__file__).parent.parent
     output_dir = base_dir / 'submissions'
 
-    required_files = ['d2.mat', 'd3.mat', 'd4.mat', 'd5.mat', 'd6.mat']
+    required_files = ['D2.mat', 'D3.mat', 'D4.mat', 'D5.mat', 'D6.mat']  # Uppercase!
     all_valid = True
 
     for filename in required_files:
