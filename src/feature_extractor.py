@@ -17,31 +17,45 @@ class FeatureExtractor:
         self.scaler = None
         self.waveform_scaler = None
 
-    def extract_handcrafted_features(self, waveforms):
+    def extract_handcrafted_features(self, waveforms, raw_waveforms=None):
         """
         Extract hand-crafted features from waveforms.
 
-        Features:
-        - Peak amplitude
-        - Peak location (relative to window center)
-        - Trough amplitude (minimum value)
-        - Peak-to-trough amplitude
-        - Waveform width at half maximum
-        - Rise time (10% to 90% of peak)
-        - Decay time (90% to 10% after peak)
-        - Area under curve
-        - Waveform energy
+        Parameters:
+        -----------
+        waveforms : np.ndarray
+            Filtered waveforms for shape-based features
+        raw_waveforms : np.ndarray or None
+            Unfiltered waveforms for amplitude features (critical for Class 2)
+
+        Features (from filtered):
+        - Peak amplitude, location, trough, peak-to-trough
+        - Width at half max, rise/decay times
+        - Area, energy, slopes, asymmetry
+
+        Features (from raw - if provided):
+        - Raw peak amplitude (critical for distinguishing Class 2)
+        - Raw energy
         """
-        n_spikes = len(waveforms)
         features = []
 
-        for wf in waveforms:
-            # Normalize waveform for shape features
-            wf_centered = wf - np.mean(wf[:5])  # Subtract baseline (first 5 samples)
+        # Use raw waveforms for amplitude if available, else use filtered
+        amp_waveforms = raw_waveforms if raw_waveforms is not None else waveforms
 
-            # Peak amplitude and location
+        for i, wf in enumerate(waveforms):
+            # Get corresponding raw waveform for amplitude
+            wf_raw = amp_waveforms[i] if raw_waveforms is not None else wf
+
+            # Baseline subtraction
+            wf_centered = wf - np.mean(wf[:5])
+            wf_raw_centered = wf_raw - np.mean(wf_raw[:5])
+
+            # Peak amplitude and location (from filtered - more accurate location)
             peak_idx = np.argmax(wf_centered)
             peak_amp = wf_centered[peak_idx]
+
+            # RAW peak amplitude (critical for Class 2 distinction!)
+            raw_peak_amp = np.max(wf_raw_centered)
 
             # Trough (minimum)
             trough_idx = np.argmin(wf_centered)
@@ -81,8 +95,11 @@ class FeatureExtractor:
             # Area under curve (absolute)
             area = np.trapz(np.abs(wf_centered))
 
-            # Waveform energy
+            # Waveform energy (filtered)
             energy = np.sum(wf_centered ** 2)
+
+            # RAW waveform energy (important for amplitude-based classification)
+            raw_energy = np.sum(wf_raw_centered ** 2)
 
             # Slope features
             if peak_idx > 0:
@@ -100,6 +117,9 @@ class FeatureExtractor:
             post_peak_area = np.trapz(np.abs(wf_centered[peak_idx:])) if peak_idx < len(wf_centered) else 0
             asymmetry = (post_peak_area - pre_peak_area) / (post_peak_area + pre_peak_area + 1e-10)
 
+            # Amplitude ratio (raw/filtered) - indicates noise level
+            amp_ratio = raw_peak_amp / (peak_amp + 1e-10) if peak_amp > 0 else 1.0
+
             features.append([
                 peak_amp,
                 peak_idx - self.window_before,  # Relative to center
@@ -112,29 +132,34 @@ class FeatureExtractor:
                 energy,
                 max_rise_slope,
                 max_fall_slope,
-                asymmetry
+                asymmetry,
+                raw_peak_amp,      # NEW: Raw amplitude (critical for Class 2)
+                raw_energy,        # NEW: Raw energy
+                amp_ratio,         # NEW: Noise indicator
             ])
 
         return np.array(features)
 
     def fit(self, waveforms):
         """Fit the feature extractor on training waveforms."""
-        # Normalize waveforms for shape-based features (uses filtering internally)
-        waveforms_norm = self.normalize_waveforms(waveforms)
+        # Filter waveforms to reduce noise while preserving amplitude
+        waveforms_filtered = self.filter_waveforms(waveforms)
 
-        # Fit waveform scaler on normalized waveforms
+        # IMPORTANT: Do NOT normalize - amplitude is critical for distinguishing classes!
+        # Analysis showed Class 2, 4, 5 have similar shapes but different amplitudes.
+        # Normalization destroys this information and causes Class 2 collapse.
+
+        # Fit waveform scaler on filtered (but NOT normalized) waveforms
         self.waveform_scaler = StandardScaler()
-        waveforms_scaled = self.waveform_scaler.fit_transform(waveforms_norm)
+        waveforms_scaled = self.waveform_scaler.fit_transform(waveforms_filtered)
 
-        # Fit PCA on scaled normalized waveforms (captures shape, not amplitude)
+        # Fit PCA on filtered waveforms (captures both shape AND amplitude)
         self.pca = PCA(n_components=self.n_pca_components)
         self.pca.fit(waveforms_scaled)
 
-        # Filter waveforms for handcrafted features (more robust to noise)
-        waveforms_filtered = self.filter_waveforms(waveforms)
-
-        # Extract and fit scaler for handcrafted features (from filtered waveforms)
-        handcrafted = self.extract_handcrafted_features(waveforms_filtered)
+        # Extract handcrafted features using BOTH filtered (for shape) and raw (for amplitude)
+        # The raw amplitude is critical for distinguishing Class 2 from other classes
+        handcrafted = self.extract_handcrafted_features(waveforms_filtered, raw_waveforms=waveforms)
         self.scaler = StandardScaler()
         self.scaler.fit(handcrafted)
 
@@ -197,18 +222,16 @@ class FeatureExtractor:
         if self.pca is None or self.scaler is None:
             raise ValueError("FeatureExtractor must be fit before transform")
 
-        # Normalize waveforms for shape-based features (uses filtering internally)
-        waveforms_norm = self.normalize_waveforms(waveforms)
-
-        # PCA features on normalized waveforms (shape-based)
-        waveforms_scaled = self.waveform_scaler.transform(waveforms_norm)
-        pca_features = self.pca.transform(waveforms_scaled)
-
-        # Filter waveforms for handcrafted features (more robust to noise)
+        # Filter waveforms to reduce noise while preserving amplitude
         waveforms_filtered = self.filter_waveforms(waveforms)
 
-        # Handcrafted features from FILTERED waveforms (noise-robust)
-        handcrafted = self.extract_handcrafted_features(waveforms_filtered)
+        # PCA features on filtered waveforms (captures shape AND amplitude)
+        waveforms_scaled = self.waveform_scaler.transform(waveforms_filtered)
+        pca_features = self.pca.transform(waveforms_scaled)
+
+        # Handcrafted features: filtered for shape, raw for amplitude
+        # The raw amplitude is critical for distinguishing Class 2 from other classes
+        handcrafted = self.extract_handcrafted_features(waveforms_filtered, raw_waveforms=waveforms)
         handcrafted_scaled = self.scaler.transform(handcrafted)
 
         # Combine all features

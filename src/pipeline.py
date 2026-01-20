@@ -7,7 +7,7 @@ import pickle
 
 from spike_detector import detect_spikes, detect_spikes_matched_filter
 from feature_extractor import FeatureExtractor, extract_waveforms_at_indices
-from classifier import SpikeClassifier
+from classifier import SpikeClassifier, TemplateClassifier
 
 
 class SpikeSortingPipeline:
@@ -22,6 +22,7 @@ class SpikeSortingPipeline:
             window_after=window_after
         )
         self.classifier = SpikeClassifier(method='ensemble')
+        self.template_classifier = TemplateClassifier()  # Template-based classifier for high noise
         self.templates = None  # Average waveforms per class for matched filtering
         self.is_trained = False
 
@@ -133,10 +134,10 @@ class SpikeSortingPipeline:
         # D2: σ=0.23, D3: σ=0.31, D4: σ=0.49, D5: σ=0.92, D6: σ=1.37
         noise_levels = [0.3, 0.5, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0]
 
-        # Class 3 tends to be over-predicted in noisy conditions because it has
-        # smaller amplitude spikes. We undersample Class 3 augmentations to compensate.
-        # Peer benchmark shows Class 3 should be ~8%, so we aggressively undersample.
-        class3_sample_prob = 0.1  # Only keep 10% of Class 3 augmentations
+        # Class 3 has the smallest amplitude (1.72V vs 3-5.7V for others).
+        # With amplitude preserved in features, undersampling is less critical.
+        # Moderate undersampling to prevent bias without destroying class representation.
+        class3_sample_prob = 0.5  # Keep 50% of Class 3 augmentations
 
         for noise_level in noise_levels:
             for wf, cls in zip(gt_waveforms, gt_valid_classes):
@@ -185,6 +186,10 @@ class SpikeSortingPipeline:
         print("Training classifier...")
         self.classifier.fit(X, all_classes)
 
+        # Train template classifier for high-noise fallback
+        print("Training template classifier...")
+        self.template_classifier.fit(gt_waveforms, gt_valid_classes)
+
         # Evaluate on training data
         print("\n=== Training Performance ===")
         self.classifier.evaluate(X, all_classes)
@@ -195,7 +200,8 @@ class SpikeSortingPipeline:
         return self
 
     def predict(self, d, use_matched_filter=False, threshold_factor=None,
-                voltage_threshold=None, correlation_threshold=None):
+                voltage_threshold=None, correlation_threshold=None,
+                use_template_classifier=False):
         """
         Detect and classify spikes in new data.
 
@@ -211,6 +217,8 @@ class SpikeSortingPipeline:
             Fixed voltage threshold (overrides threshold_factor) - for standard detection
         correlation_threshold : float or None
             Fixed correlation threshold (0-1 range) - for matched filter detection
+        use_template_classifier : bool
+            Use template-based classification (more robust for high-noise datasets)
 
         Returns:
         --------
@@ -246,10 +254,28 @@ class SpikeSortingPipeline:
         if len(indices) == 0:
             return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
 
-        # Extract features and classify
-        print("Classifying spikes...")
-        X = self.feature_extractor.transform(waveforms)
-        predicted_classes = self.classifier.predict(X)
+        # Classify spikes
+        if use_template_classifier == 'hybrid':
+            # Hybrid approach: combine ML and Template predictions
+            print("Classifying spikes (hybrid ML + Template)...")
+            X = self.feature_extractor.transform(waveforms)
+            ml_proba = self.classifier.predict_proba(X)
+            template_proba = self.template_classifier.predict_proba(waveforms)
+
+            # Use geometric mean to balance contributions
+            # This prevents overconfident ML from dominating
+            combined_proba = np.sqrt(ml_proba * template_proba)
+            # Normalize rows to sum to 1
+            combined_proba = combined_proba / (combined_proba.sum(axis=1, keepdims=True) + 1e-10)
+            predicted_classes = np.argmax(combined_proba, axis=1) + 1  # Classes 1-5
+
+        elif use_template_classifier:
+            print("Classifying spikes (template-based)...")
+            predicted_classes = self.template_classifier.predict(waveforms)
+        else:
+            print("Classifying spikes (ML-based)...")
+            X = self.feature_extractor.transform(waveforms)
+            predicted_classes = self.classifier.predict(X)
 
         return indices, predicted_classes
 
@@ -347,6 +373,7 @@ class SpikeSortingPipeline:
             pickle.dump({
                 'feature_extractor': self.feature_extractor,
                 'classifier': self.classifier,
+                'template_classifier': self.template_classifier,
                 'templates': self.templates,
                 'window_before': self.window_before,
                 'window_after': self.window_after,
@@ -360,6 +387,7 @@ class SpikeSortingPipeline:
             state = pickle.load(f)
         self.feature_extractor = state['feature_extractor']
         self.classifier = state['classifier']
+        self.template_classifier = state.get('template_classifier', TemplateClassifier())
         self.templates = state['templates']
         self.window_before = state['window_before']
         self.window_after = state['window_after']
