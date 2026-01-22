@@ -363,7 +363,7 @@ class CNNEnsemble:
         """
         # Load defaults if no thresholds provided
         if thresholds is None:
-            from optimize_thresholds import ThresholdOptimizer
+            from deprecated.optimize_thresholds import ThresholdOptimizer
             thresholds = ThresholdOptimizer.DEFAULT_THRESHOLDS
 
         # Load data

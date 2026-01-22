@@ -1,3 +1,4 @@
 *.mat
 models/*
 models/spike_sorter.pkl
+Deprecated/*.zip

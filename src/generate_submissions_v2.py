@@ -30,7 +30,7 @@ from cnn_experiment import CNNExperiment
 
 def detect_spikes_mad(data, sample_rate=25000, threshold_factor=4.0,
                       min_spike_distance=30, window_before=30, window_after=30,
-                      align_peak_at=41):
+                      align_peak_at=30):
     """
     Detect spikes using MAD-based adaptive thresholding.
 
@@ -76,39 +76,37 @@ def detect_spikes_mad(data, sample_rate=25000, threshold_factor=4.0,
     # D1 Index values point ~11 samples BEFORE the actual peak
     # So D1 waveforms have peaks at sample 41 (not 30)
     # We need to extract waveforms with the same alignment
-    waveform_size = window_before + window_after
-    offset_from_peak = align_peak_at  # Peak should be at this sample in the waveform
-
+    waveform_size = 60
     valid_peaks = []
     waveforms = []
-
+    
     for peak in peaks:
-        # Refine peak location in original signal
+        # Refine peak in original signal
         search_start = max(0, peak - 10)
         search_end = min(len(data), peak + 10)
-        local_max_idx = search_start + np.argmax(data[search_start:search_end])
-        peak = local_max_idx
-
-        # Extract waveform with peak aligned at the correct position
-        # start = peak - offset_from_peak (so peak ends up at sample offset_from_peak)
-        start = peak - offset_from_peak
+        actual_peak = search_start + np.argmax(data[search_start:search_end])
+        
+        # Extract with peak at align_peak_at (SAME as training!)
+        start = actual_peak - align_peak_at
         end = start + waveform_size
-
+        
         if start >= 0 and end <= len(data):
             waveform = data[start:end]
-            waveforms.append(waveform)
-            valid_peaks.append(peak + 1)  # 1-indexed for MATLAB (actual peak location)
-
-    spike_indices = np.array(valid_peaks, dtype=np.int64)
-    spike_waveforms = np.array(waveforms) if waveforms else np.empty((0, waveform_size))
-
-    return spike_indices, spike_waveforms
+            
+            # Verify alignment
+            peak_in_wf = np.argmax(waveform)
+            if abs(peak_in_wf - align_peak_at) <= 5:
+                waveforms.append(waveform)
+                # Store the ACTUAL PEAK location (for Index output)
+                valid_peaks.append(actual_peak + 1)  # 1-indexed
+    
+    return np.array(valid_peaks), np.array(waveforms)
 
 
 def detect_spikes_matched_filter(data, templates, sample_rate=25000,
                                   correlation_threshold=0.4,
                                   min_spike_distance=30, window_before=30, window_after=30,
-                                  align_peak_at=41):
+                                  align_peak_at=30):
     """
     Detect spikes using matched filtering with D1 templates.
 
@@ -196,7 +194,7 @@ def detect_spikes_matched_filter(data, templates, sample_rate=25000,
 def detect_spikes_hybrid(data, templates, sample_rate=25000,
                          mad_factor=3.5, corr_threshold=0.35,
                          min_spike_distance=30, window_before=30, window_after=30,
-                         align_peak_at=41):
+                         align_peak_at=30):
     """
     Hybrid detection: combine MAD-based and matched filter detection.
 
@@ -273,23 +271,23 @@ def generate_submissions_v2():
     datasets = {
         'D2': {
             'method': 'mad',
-            'mad_factor': 4.0,  # ~3736 spikes (target: 3700-4000)
+            'mad_factor': 3.7,  # ~3750 spikes (target: 3700-4000)
         },
         'D3': {
             'method': 'mad',
-            'mad_factor': 3.3,  # ~3108 spikes (target: 2900-3300)
+            'mad_factor': 3.1,  # ~3072 spikes (target: 2900-3300)
         },
         'D4': {
             'method': 'mad',
-            'mad_factor': 3.0,  # ~2597 spikes (target: 2400-2800, friend: 2598)
+            'mad_factor': 2.9,  # ~2500 spikes (target: 2400-2800)
         },
         'D5': {
             'method': 'mad',
-            'mad_factor': 3.0,  # ~1830 spikes (target: 1700-2100)
+            'mad_factor': 2.9,  # ~1800 spikes (target: 1700-2100)
         },
         'D6': {
             'method': 'mad',
-            'mad_factor': 2.8,  # ~2518 spikes (target: 2100-2800, friend: 2582)
+            'mad_factor': 2.8,  # ~2400 spikes (target: 2100-2800)
         },
     }
 

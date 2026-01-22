@@ -100,7 +100,7 @@ class NightlyRunner:
         self.log("="*60)
 
         try:
-            from optimize_thresholds import ThresholdOptimizer
+            from deprecated.optimize_thresholds import ThresholdOptimizer
 
             optimizer = ThresholdOptimizer()
             optimizer.create_synthetic_d6()
@@ -127,7 +127,7 @@ class NightlyRunner:
             self.results['errors'].append(f"Threshold optimization: {str(e)}")
 
             # Fall back to defaults
-            from optimize_thresholds import ThresholdOptimizer
+            from deprecated.optimize_thresholds import ThresholdOptimizer
             return ThresholdOptimizer.DEFAULT_THRESHOLDS
 
     def train_ensemble(self, n_models=5, epochs=100):
@@ -138,7 +138,7 @@ class NightlyRunner:
         self.log("="*60)
 
         try:
-            from cnn_ensemble import CNNEnsemble
+            from deprecated.cnn_ensemble import CNNEnsemble
 
             ensemble = CNNEnsemble(n_models=n_models)
             val_f1s = ensemble.train_ensemble(epochs=epochs)
@@ -178,7 +178,7 @@ class NightlyRunner:
                 return None
 
         try:
-            from lstm_experiment import LSTMExperiment
+            from deprecated.lstm_experiment import LSTMExperiment
 
             exp = LSTMExperiment()
             f1, success = exp.train(epochs=100, early_abort_epochs=50)
@@ -212,7 +212,7 @@ class NightlyRunner:
         try:
             if ensemble is None:
                 # Load ensemble if not provided
-                from cnn_ensemble import CNNEnsemble
+                from deprecated.cnn_ensemble import CNNEnsemble
                 ensemble = CNNEnsemble()
                 ensemble.load_ensemble()
 
