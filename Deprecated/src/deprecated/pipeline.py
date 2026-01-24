@@ -6,12 +6,12 @@ from pathlib import Path
 import pickle
 
 from spike_detector import detect_spikes, detect_spikes_matched_filter
-from feature_extractor import FeatureExtractor, extract_waveforms_at_indices
-from classifier import SpikeClassifier, TemplateClassifier
+from deprecated.feature_extractor import FeatureExtractor, extract_waveforms_at_indices
+from deprecated.classifier import SpikeClassifier, TemplateClassifier
 
 # CNN classifier import (optional - only used when use_cnn=True)
 try:
-    from cnn_experiment import CNNExperiment
+    from deprecated.cnn_experiment import CNNExperiment
     CNN_AVAILABLE = True
 except ImportError:
     CNN_AVAILABLE = False

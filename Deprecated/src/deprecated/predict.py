@@ -3,7 +3,7 @@
 import sys
 from pathlib import Path
 import zipfile
-from pipeline import SpikeSortingPipeline
+from deprecated.pipeline import SpikeSortingPipeline
 
 
 def main():

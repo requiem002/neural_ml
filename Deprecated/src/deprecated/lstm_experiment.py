@@ -29,8 +29,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent))
 
 from spike_detector import detect_spikes
-from feature_extractor import extract_waveforms_at_indices
-from cnn_experiment import CNNExperiment
+from deprecated.feature_extractor import extract_waveforms_at_indices
+from deprecated.cnn_experiment import CNNExperiment
 
 
 class BiLSTMSpikeNet(nn.Module):

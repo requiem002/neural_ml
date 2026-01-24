@@ -2,7 +2,7 @@
 
 import sys
 from pathlib import Path
-from pipeline import SpikeSortingPipeline
+from deprecated.pipeline import SpikeSortingPipeline
 
 
 def main():

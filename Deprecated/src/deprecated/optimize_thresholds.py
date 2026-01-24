@@ -26,7 +26,7 @@ from datetime import datetime
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
 
-from feature_extractor import extract_waveforms_at_indices
+from deprecated.feature_extractor import extract_waveforms_at_indices
 
 
 class ThresholdOptimizer:
@@ -88,7 +88,7 @@ class ThresholdOptimizer:
 
     def load_model(self):
         """Load the trained CNN model."""
-        from cnn_experiment import DualBranchSpikeNet
+        from deprecated.cnn_experiment import DualBranchSpikeNet
 
         filepath = self.model_dir / 'cnn_model.pkl'
         with open(filepath, 'rb') as f:
@@ -155,7 +155,7 @@ class ThresholdOptimizer:
 
     def extract_features(self, waveforms):
         """Extract amplitude features for classification."""
-        from cnn_experiment import CNNExperiment
+        from deprecated.cnn_experiment import CNNExperiment
 
         exp = CNNExperiment(device=self.device)
         exp.amp_mean = self.amp_mean

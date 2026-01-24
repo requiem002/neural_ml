@@ -20,7 +20,7 @@ with open(model_dir / 'spike_sorter.pkl', 'rb') as f:
     state = pickle.load(f)
 
 # We need to import the pipeline class to use it
-from pipeline import SpikeSortingPipeline
+from deprecated.pipeline import SpikeSortingPipeline
 pipeline = SpikeSortingPipeline()
 pipeline.load(model_dir / 'spike_sorter.pkl')
 

@@ -1,5 +1,5 @@
 """
-CNN Experiment for Spike Classification - FIXED ALIGNMENT VERSION
+CNN Experiment for Spike Classification - FIXED ALIGNMENT VERSION (SINGLE BRANCH)
 
 CRITICAL FIX: This version ensures training and inference use the SAME
 waveform alignment. The original code had:
@@ -10,6 +10,8 @@ This mismatch caused the CNN to learn features at wrong positions.
 
 FIX: Both training and inference now extract waveforms with peaks
 aligned at sample 30 (centered in 60-sample window).
+
+AMPLITUDE BRANCH REMOVED: This version relies solely on the 1D CNN shape branch.
 """
 
 import argparse
@@ -170,67 +172,55 @@ def detect_spikes_aligned(data, sample_rate=25000, threshold_factor=4.0,
 
 
 # =============================================================================
-# CNN MODEL (unchanged from original)
+# CNN MODEL (Single Branch)
 # =============================================================================
 
-class DualBranchSpikeNet(nn.Module):
+class SpikeNet(nn.Module):
     """
-    Dual-branch CNN for spike classification.
-    Branch 1 (Shape): Multi-scale 1D CNN for waveform shape features
-    Branch 2 (Amplitude): MLP for amplitude-based features
+    Single-branch 1D CNN for spike classification.
+    Focuses purely on waveform shape features.
     """
 
-    def __init__(self, waveform_size=60, num_classes=5, num_amp_features=8, dropout_rate=0.3):
-        super(DualBranchSpikeNet, self).__init__()
+    def __init__(self, waveform_size=60, num_classes=5, dropout_rate=0.3):
+        super(SpikeNet, self).__init__()
 
         self.waveform_size = waveform_size
         self.num_classes = num_classes
 
-        # Shape Branch (1D CNN)
-        self.conv1 = nn.Conv1d(1, 16, kernel_size=5, padding=2)
-        self.bn1 = nn.BatchNorm1d(16)
-        self.conv2 = nn.Conv1d(16, 32, kernel_size=5, padding=2)
-        self.bn2 = nn.BatchNorm1d(32)
+        # Shape Branch - Deep 1D CNN
+        self.conv1 = nn.Conv1d(1, 32, kernel_size=5, padding=2)
+        self.bn1 = nn.BatchNorm1d(32)
+        self.conv2 = nn.Conv1d(32, 64, kernel_size=5, padding=2)
+        self.bn2 = nn.BatchNorm1d(64)
         self.pool1 = nn.MaxPool1d(2)
-        self.conv3 = nn.Conv1d(32, 64, kernel_size=3, padding=1)
-        self.bn3 = nn.BatchNorm1d(64)
+        
+        self.conv3 = nn.Conv1d(64, 128, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm1d(128)
         self.pool2 = nn.MaxPool1d(2)
-        self.shape_fc = nn.Linear(64 * (waveform_size // 4), 48)
-
-        # Amplitude Branch
-        self.amp_fc1 = nn.Linear(num_amp_features, 32)
-        self.amp_bn1 = nn.BatchNorm1d(32)
-        self.amp_fc2 = nn.Linear(32, 32)
-        self.amp_bn2 = nn.BatchNorm1d(32)
-
-        # Combined Classifier
-        self.combined_fc1 = nn.Linear(80, 48)
-        self.combined_fc2 = nn.Linear(48, num_classes)
-
+        
+        # Flatten size: 128 filters * (60 / 4 = 15 samples) = 1920
+        self.fc1 = nn.Linear(128 * (waveform_size // 4), 128)
+        self.fc2 = nn.Linear(128, 64)
+        self.fc3 = nn.Linear(64, num_classes)
+        
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(dropout_rate)
 
-    def forward(self, waveform, amp_features):
-        # Shape Branch
+    def forward(self, waveform):
+        # Input shape: [Batch, 60] -> [Batch, 1, 60]
         x = waveform.unsqueeze(1)
+        
         x = self.relu(self.bn1(self.conv1(x)))
         x = self.pool1(self.relu(self.bn2(self.conv2(x))))
         x = self.pool2(self.relu(self.bn3(self.conv3(x))))
-        x = x.view(x.size(0), -1)
-        shape_emb = self.relu(self.shape_fc(x))
-
-        # Amplitude Branch
-        amp = self.relu(self.amp_bn1(self.amp_fc1(amp_features)))
-        amp_emb = self.relu(self.amp_bn2(self.amp_fc2(amp)))
-
-        # Combined
-        combined = torch.cat([shape_emb, amp_emb], dim=1)
-        combined = self.dropout(combined)
-        combined = self.relu(self.combined_fc1(combined))
-        combined = self.dropout(combined)
-        output = self.combined_fc2(combined)
-
-        return output
+        
+        x = x.view(x.size(0), -1) # Flatten
+        
+        x = self.dropout(self.relu(self.fc1(x)))
+        x = self.dropout(self.relu(self.fc2(x)))
+        x = self.fc3(x)
+        
+        return x
 
 
 # =============================================================================
@@ -249,8 +239,7 @@ class CNNExperimentFixed:
         print(f"Using device: {self.device}")
 
         self.model = None
-        self.amp_mean = None
-        self.amp_std = None
+        # Removed amplitude scaler initialization
 
         # Paths
         self.base_dir = Path(__file__).parent.parent
@@ -264,9 +253,6 @@ class CNNExperimentFixed:
     def load_d1_data_aligned(self):
         """
         Load D1 training data with CONSISTENT peak alignment.
-        
-        THIS IS THE KEY FIX: ensures training waveforms have peaks at
-        the same position as inference waveforms.
         """
         print(f"\nLoading D1 with ALIGNED extraction (peak at sample {ALIGN_PEAK_AT})...")
         
@@ -288,96 +274,6 @@ class CNNExperimentFixed:
         
         return waveforms, valid_classes
 
-    def extract_amplitude_features(self, waveforms, sample_rate=25000):
-        """Extract amplitude-based features from waveforms."""
-        from scipy import signal as sig
-
-        nyquist = sample_rate / 2
-        low = 300 / nyquist
-        high = 3000 / nyquist
-        b, a = sig.butter(2, [low, high], btype='band')
-
-        features = []
-        for wf in waveforms:
-            try:
-                wf_filtered = sig.filtfilt(b, a, wf, padlen=min(15, len(wf)-1))
-            except ValueError:
-                wf_filtered = wf
-
-            baseline_raw = np.mean(wf[:5])
-            wf_raw_centered = wf - baseline_raw
-            baseline_filt = np.mean(wf_filtered[:5])
-            wf_filt_centered = wf_filtered - baseline_filt
-
-            # 1. Peak amplitude
-            peak_idx = np.argmax(wf_filt_centered)
-            peak_amp = wf_raw_centered[peak_idx]
-
-            # 2. Energy
-            energy = np.sum(wf_raw_centered ** 2)
-
-            # 3. Amplitude ratio
-            neg_trough = np.min(wf_raw_centered)
-            amp_ratio = peak_amp / (abs(neg_trough) + 1e-10) if abs(neg_trough) > 0.01 else 1.0
-
-            # 4. FWHM
-            half_max = wf_filt_centered[peak_idx] / 2
-            above_half = wf_filt_centered > half_max
-            if np.any(above_half):
-                crossings = np.where(np.diff(above_half.astype(int)))[0]
-                if len(crossings) >= 2:
-                    fwhm_samples = crossings[-1] - crossings[0]
-                    fwhm_ms = fwhm_samples / sample_rate * 1000
-                else:
-                    fwhm_ms = 0.5
-            else:
-                fwhm_ms = 0.5
-
-            # 5. Repolarization slope
-            if peak_idx < len(wf_filt_centered) - 5:
-                post_peak = wf_filt_centered[peak_idx:min(peak_idx + 20, len(wf_filt_centered))]
-                if len(post_peak) > 2:
-                    trough_idx_local = np.argmin(post_peak)
-                    if trough_idx_local > 0:
-                        repol_slope = (post_peak[trough_idx_local] - post_peak[0]) / (trough_idx_local / sample_rate * 1000)
-                    else:
-                        repol_slope = 0
-                else:
-                    repol_slope = 0
-            else:
-                repol_slope = 0
-
-            # 6. Symmetry ratio
-            pre_peak_area = np.sum(np.abs(wf_filt_centered[:peak_idx + 1])) if peak_idx > 0 else 1
-            post_peak_area = np.sum(np.abs(wf_filt_centered[peak_idx:])) if peak_idx < len(wf_filt_centered) else 1
-            symmetry = pre_peak_area / (post_peak_area + 1e-10)
-
-            # 7. Peak-to-trough amplitude
-            peak_to_trough = peak_amp - neg_trough
-
-            # 8. Rise slope
-            if peak_idx > 2:
-                rising = wf_filt_centered[:peak_idx + 1]
-                peak_filt = wf_filt_centered[peak_idx]
-                thresh_10 = 0.1 * peak_filt
-                thresh_90 = 0.9 * peak_filt
-                rise_10_idx = np.where(rising > thresh_10)[0]
-                rise_90_idx = np.where(rising > thresh_90)[0]
-                if len(rise_10_idx) > 0 and len(rise_90_idx) > 0:
-                    rise_time = (rise_90_idx[0] - rise_10_idx[0]) / sample_rate * 1000
-                    rise_slope = (thresh_90 - thresh_10) / (rise_time + 1e-10)
-                else:
-                    rise_slope = 0
-            else:
-                rise_slope = 0
-
-            features.append([
-                peak_amp, energy, amp_ratio, fwhm_ms,
-                repol_slope, symmetry, peak_to_trough, rise_slope
-            ])
-
-        return np.array(features)
-
     def preprocess_waveform(self, waveform, normalize_for_shape=True):
         """Preprocess waveform for shape branch."""
         baseline = np.mean(waveform[:5])
@@ -390,7 +286,7 @@ class CNNExperimentFixed:
             return wf_centered
         return wf_centered
 
-    def augment_data(self, waveforms, labels, noise_levels=[0.3, 0.5, 0.8, 1.0],
+    def augment_data(self, waveforms, labels, noise_levels=[0.5, 1.5, 2.5, 3.5, 4.3],
                      scale_factors=[0.85, 0.95, 1.05, 1.15], jitter_range=2):
         """Augment training data."""
         augmented_waveforms = list(waveforms)
@@ -426,64 +322,72 @@ class CNNExperimentFixed:
 
         return np.array(augmented_waveforms), np.array(augmented_labels)
 
-    def prepare_data(self, waveforms, labels=None, fit_scalers=False):
-        """Prepare data for the CNN."""
-        waveforms_normalized = np.array([
-            self.preprocess_waveform(wf, normalize_for_shape=True) for wf in waveforms
-        ])
-
-        amp_features = self.extract_amplitude_features(waveforms)
-
-        if fit_scalers:
-            self.amp_mean = np.mean(amp_features, axis=0)
-            self.amp_std = np.std(amp_features, axis=0) + 1e-10
-
-        amp_features = (amp_features - self.amp_mean) / self.amp_std
-
-        if labels is not None:
-            return waveforms_normalized, amp_features, labels
-        return waveforms_normalized, amp_features
+    def prepare_data(self, waveforms, labels=None):
+        """
+        Prepare data: Just Normalize Shape. 
+        Removed amplitude feature extraction return.
+        """
+        # Normalize so peak is 1.0 (Critical for shape comparison)
+        waveforms_normalized = []
+        for wf in waveforms:
+            baseline = np.mean(wf[:5])
+            wf_centered = wf - baseline
+            peak = np.max(np.abs(wf_centered))
+            if peak > 0.1:
+                waveforms_normalized.append(wf_centered / peak)
+            else:
+                waveforms_normalized.append(wf_centered)
+        
+        return np.array(waveforms_normalized), labels
 
     def train(self, epochs=100, batch_size=64, lr=0.001, patience=15):
         """Train the CNN classifier with ALIGNED data."""
         print("\n" + "=" * 60)
-        print("CNN TRAINING (FIXED ALIGNMENT)")
+        print("CNN TRAINING (FIXED ALIGNMENT - SINGLE BRANCH)")
         print("=" * 60)
-
+        
         # Load data with ALIGNED extraction
         waveforms, classes = self.load_d1_data_aligned()
-
         print(f"\nTotal waveforms: {len(waveforms)}")
+
         print("Class distribution:")
         for c in range(1, 6):
             count = np.sum(classes == c)
             print(f"  Class {c}: {count} ({100*count/len(classes):.1f}%)")
 
-        # Augment data
-        print("\nAugmenting data...")
-        aug_waveforms, aug_labels = self.augment_data(waveforms, classes)
-        print(f"Augmented samples: {len(aug_waveforms)}")
-
-        # Train/val split
-        train_wf, val_wf, train_lbl, val_lbl = train_test_split(
-            aug_waveforms, aug_labels, test_size=0.2, random_state=42, stratify=aug_labels
+        # 2. SPLIT FIRST (Crucial Fix)
+        # Split the pure, un-augmented data first to prevent leakage
+        train_wf_raw, val_wf_raw, train_lbl_raw, val_lbl_raw = train_test_split(
+            waveforms, classes, test_size=0.2, random_state=42, stratify=classes
         )
+        print(f"Training samples (Raw): {len(train_wf_raw)}")
+        print(f"Validation samples (Raw): {len(val_wf_raw)}")
 
-        print(f"Training samples: {len(train_wf)}")
-        print(f"Validation samples: {len(val_wf)}")
+        # 3. Augment ONLY the Training set
+        print("\nAugmenting TRAINING data only...")
+        train_wf_aug, train_lbl_aug = self.augment_data(train_wf_raw, train_lbl_raw)
+        print(f"Training samples (After Augmentation): {len(train_wf_aug)}")
 
-        # Prepare data
-        print("\nPreparing data...")
-        train_wf_norm, train_amp, train_lbl = self.prepare_data(train_wf, train_lbl, fit_scalers=True)
-        val_wf_norm, val_amp, val_lbl = self.prepare_data(val_wf, val_lbl)
+        # Validation set remains PURE (no augmentation)
+        val_wf_final, val_lbl_final = val_wf_raw, val_lbl_raw
+
+        print(f"Training samples: {len(train_wf_aug)}")
+        print(f"Validation samples: {len(val_lbl_final)}")
+
+        # Prepare data (Shape Normalization)
+        # Note: We still normalize for the CNN because it is "Shape Only"
+        train_wf_norm, train_lbl = self.prepare_data(train_wf_aug, train_lbl_aug)
+        val_wf_norm, val_lbl = self.prepare_data(val_wf_final, val_lbl_final)
+
+
+        
+
 
         # Convert to tensors
         X_wf_train = torch.FloatTensor(train_wf_norm).to(self.device)
-        X_amp_train = torch.FloatTensor(train_amp).to(self.device)
         y_train = torch.LongTensor(train_lbl - 1).to(self.device)
 
         X_wf_val = torch.FloatTensor(val_wf_norm).to(self.device)
-        X_amp_val = torch.FloatTensor(val_amp).to(self.device)
         y_val = torch.LongTensor(val_lbl - 1).to(self.device)
 
         # Class-weighted sampling
@@ -491,14 +395,15 @@ class CNNExperimentFixed:
         weights = [1.0 / class_counts[lbl] for lbl in train_lbl]
         sampler = WeightedRandomSampler(weights, len(weights), replacement=True)
 
-        train_dataset = TensorDataset(X_wf_train, X_amp_train, y_train)
-        val_dataset = TensorDataset(X_wf_val, X_amp_val, y_val)
+        # Dataset now only has 2 tensors (Waveform, Label)
+        train_dataset = TensorDataset(X_wf_train, y_train)
+        val_dataset = TensorDataset(X_wf_val, y_val)
 
         train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler)
         val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
         # Initialize model
-        self.model = DualBranchSpikeNet(waveform_size=WINDOW_SIZE, num_classes=5, num_amp_features=8).to(self.device)
+        self.model = SpikeNet(waveform_size=WINDOW_SIZE, num_classes=5).to(self.device)
 
         # Loss with class weights
         class_weights = torch.FloatTensor([1.0 / class_counts[c] for c in range(1, 6)]).to(self.device)
@@ -520,9 +425,10 @@ class CNNExperimentFixed:
             train_correct = 0
             train_total = 0
 
-            for batch_wf, batch_amp, batch_y in train_loader:
+            # Loader now returns only 2 items
+            for batch_wf, batch_y in train_loader:
                 optimizer.zero_grad()
-                outputs = self.model(batch_wf, batch_amp)
+                outputs = self.model(batch_wf)
                 loss = criterion(outputs, batch_y)
                 loss.backward()
                 optimizer.step()
@@ -540,8 +446,8 @@ class CNNExperimentFixed:
             val_true = []
 
             with torch.no_grad():
-                for batch_wf, batch_amp, batch_y in val_loader:
-                    outputs = self.model(batch_wf, batch_amp)
+                for batch_wf, batch_y in val_loader:
+                    outputs = self.model(batch_wf)
                     _, predicted = outputs.max(1)
                     val_preds.extend(predicted.cpu().numpy())
                     val_true.extend(batch_y.cpu().numpy())
@@ -581,8 +487,8 @@ class CNNExperimentFixed:
         val_true = []
 
         with torch.no_grad():
-            for batch_wf, batch_amp, batch_y in val_loader:
-                outputs = self.model(batch_wf, batch_amp)
+            for batch_wf, batch_y in val_loader:
+                outputs = self.model(batch_wf)
                 _, predicted = outputs.max(1)
                 val_preds.extend(predicted.cpu().numpy() + 1)
                 val_true.extend(batch_y.cpu().numpy() + 1)
@@ -597,11 +503,10 @@ class CNNExperimentFixed:
         return best_val_f1
 
     def save_model(self):
-        """Save trained model and scalers."""
+        """Save trained model."""
         state = {
             'model_state': self.model.state_dict(),
-            'amp_mean': self.amp_mean,
-            'amp_std': self.amp_std,
+            # Removed amp_mean and amp_std
             'align_peak_at': ALIGN_PEAK_AT,  # Save alignment setting!
         }
         filepath = self.model_dir / 'cnn_model_fixed.pkl'
@@ -610,15 +515,14 @@ class CNNExperimentFixed:
         print(f"\nModel saved to: {filepath}")
 
     def load_model(self):
-        """Load trained model and scalers."""
+        """Load trained model."""
         filepath = self.model_dir / 'cnn_model_fixed.pkl'
         with open(filepath, 'rb') as f:
             state = pickle.load(f)
 
-        self.model = DualBranchSpikeNet(waveform_size=WINDOW_SIZE, num_classes=5, num_amp_features=8).to(self.device)
+        self.model = SpikeNet(waveform_size=WINDOW_SIZE, num_classes=5).to(self.device)
         self.model.load_state_dict(state['model_state'])
-        self.amp_mean = state['amp_mean']
-        self.amp_std = state['amp_std']
+        # Removed amp_mean and amp_std loading
         
         saved_alignment = state.get('align_peak_at', 30)
         if saved_alignment != ALIGN_PEAK_AT:
@@ -652,16 +556,15 @@ class CNNExperimentFixed:
         peak_positions = [np.argmax(wf) for wf in waveforms[:100]]
         print(f"Peak positions (first 100): mean={np.mean(peak_positions):.1f}, std={np.std(peak_positions):.1f}")
 
-        # Prepare data
-        wf_norm, amp_features = self.prepare_data(waveforms)
-
+        # Prepare data (Shape only)
+        wf_norm, _ = self.prepare_data(waveforms)
+        
         # Predict
         self.model.eval()
         X_wf = torch.FloatTensor(wf_norm).to(self.device)
-        X_amp = torch.FloatTensor(amp_features).to(self.device)
 
         with torch.no_grad():
-            outputs = self.model(X_wf, X_amp)
+            outputs = self.model(X_wf)
             probs = torch.softmax(outputs, dim=1).cpu().numpy()
             _, predicted = outputs.max(1)
             classes = predicted.cpu().numpy() + 1
@@ -700,15 +603,14 @@ class CNNExperimentFixed:
 
         print(f"Detected: {len(detected_indices)} spikes")
 
-        # Prepare and predict
-        wf_norm, amp_features = self.prepare_data(detected_waveforms)
+        # Prepare and predict (Shape only)
+        wf_norm, _ = self.prepare_data(detected_waveforms)
         
         self.model.eval()
         X_wf = torch.FloatTensor(wf_norm).to(self.device)
-        X_amp = torch.FloatTensor(amp_features).to(self.device)
 
         with torch.no_grad():
-            outputs = self.model(X_wf, X_amp)
+            outputs = self.model(X_wf)
             _, predicted = outputs.max(1)
             pred_classes = predicted.cpu().numpy() + 1
 

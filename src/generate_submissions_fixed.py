@@ -1,35 +1,18 @@
 #!/usr/bin/env python3
 """
-FIXED Submission Generator for EE40098 Coursework C
+OPTIMIZED Submission Generator - V5
 
-CRITICAL FIX: This version ensures waveform alignment is CONSISTENT between
-the CNN training and inference. Both use align_peak_at=30.
+KEY INSIGHT: The matched filter already computes correlation with ALL 5 templates!
+We were throwing away this classification information and using CNN instead.
 
-Detection Methods Explained:
-----------------------------
-1. MAD (Median Absolute Deviation):
-   - Finds peaks above threshold = k × estimated_noise_level
-   - Good for clean data where spikes are clearly above noise
-   - Use for D2, D3, D4
+For D5/D6 (low SNR):
+- CNN was trained on clean D1 data → doesn't generalize to noisy data
+- Matched filter ALREADY knows which template matched best at each spike
+- Use template-based classification instead of CNN!
 
-2. Matched Filter:
-   - Correlates signal with known spike templates from D1
-   - Finds spikes that "look like" the training examples
-   - Better for noisy data where amplitude alone isn't reliable
-   - Use for D5, D6
-
-3. Hybrid:
-   - Combines both methods (takes union of detected spikes)
-   - Maximum recall but may have more false positives
-   - Use when you want to catch every possible spike
-
-Usage:
-------
-1. First, train the fixed CNN:
-   python cnn_experiment_fixed.py --train
-
-2. Then generate submissions:
-   python generate_submissions_fixed.py
+Strategy:
+- D2/D3/D4: MAD detection + CNN classification (high SNR, works well)
+- D5/D6: Matched filter detection + TEMPLATE-BASED classification
 """
 
 import numpy as np
@@ -41,168 +24,153 @@ from collections import Counter
 import torch
 
 # =============================================================================
-# CRITICAL: ALIGNMENT CONSTANT - MUST MATCH CNN TRAINING
+# ALIGNMENT CONSTANT - MUST MATCH CNN TRAINING
 # =============================================================================
-ALIGN_PEAK_AT = 30  # Peak will be at sample 30 (centered in 60-sample window)
+ALIGN_PEAK_AT = 30
 WINDOW_SIZE = 60
 
 
 # =============================================================================
-# DETECTION FUNCTIONS (all use consistent alignment)
+# MAD DETECTION (for clean data: D2, D3, D4)
 # =============================================================================
 
 def detect_spikes_mad(data, sample_rate=25000, threshold_factor=4.0,
                       min_spike_distance=30):
-    """
-    Detect spikes using MAD-based adaptive thresholding.
-    
-    HOW IT WORKS:
-    1. Bandpass filter the signal (300-3000 Hz) to isolate spike frequencies
-    2. Estimate noise level using MAD (robust to outliers from spikes)
-    3. Set threshold = threshold_factor × noise_level
-    4. Find all peaks above threshold
-    5. Extract waveforms with peak aligned at sample ALIGN_PEAK_AT
-    
-    WHEN TO USE:
-    - Clean data (high SNR): D2, D3
-    - Moderate noise: D4
-    - Use lower threshold_factor for noisier data (more aggressive detection)
-    
-    Parameters:
-    -----------
-    threshold_factor : float
-        - 4.0-4.5: Conservative (fewer false positives, may miss weak spikes)
-        - 3.5-4.0: Moderate
-        - 2.5-3.5: Aggressive (catches more spikes but more false positives)
-    """
-    # Step 1: Bandpass filter (spike frequencies are 300-3000 Hz)
+    """MAD-based spike detection - good for high SNR data."""
     nyquist = sample_rate / 2
     b, a = signal.butter(3, [300/nyquist, 3000/nyquist], btype='band')
     filtered = signal.filtfilt(b, a, data)
     
-    # Step 2: Estimate noise using MAD (Median Absolute Deviation)
-    # MAD is robust to outliers (the spikes themselves)
     mad = np.median(np.abs(filtered - np.median(filtered)))
-    sigma = mad / 0.6745  # Convert MAD to standard deviation
+    sigma = mad / 0.6745
     threshold = threshold_factor * sigma
     
     print(f"  MAD threshold: {threshold:.3f}V (factor={threshold_factor}, σ={sigma:.3f})")
     
-    # Step 3: Find peaks above threshold
     peaks, _ = signal.find_peaks(
         filtered,
         height=threshold,
-        distance=min_spike_distance,  # Refractory period
-        prominence=threshold * 0.25   # Must be a real peak, not noise
+        distance=min_spike_distance,
+        prominence=threshold * 0.25
     )
     
-    # Step 4: Extract waveforms with CONSISTENT alignment
     valid_peaks = []
     waveforms = []
     
     for peak in peaks:
-        # Refine peak location in ORIGINAL (unfiltered) signal
         search_start = max(0, peak - 10)
         search_end = min(len(data), peak + 10)
         actual_peak = search_start + np.argmax(data[search_start:search_end])
         
-        # Extract with peak at ALIGN_PEAK_AT (MUST match training!)
         start = actual_peak - ALIGN_PEAK_AT
         end = start + WINDOW_SIZE
         
         if start >= 0 and end <= len(data):
             waveform = data[start:end]
-            
-            # Verify alignment (reject if peak isn't where expected)
             peak_in_wf = np.argmax(waveform)
             if abs(peak_in_wf - ALIGN_PEAK_AT) <= 5:
                 waveforms.append(waveform)
-                valid_peaks.append(actual_peak + 1)  # 1-indexed for MATLAB
+                valid_peaks.append(actual_peak + 1)
     
-    print(f"  Found {len(valid_peaks)} spikes")
-    return np.array(valid_peaks, dtype=np.int64), np.array(waveforms) if waveforms else np.empty((0, WINDOW_SIZE))
+    print(f"  MAD found {len(valid_peaks)} spikes")
+    return np.array(valid_peaks, dtype=np.int64), np.array(waveforms) if waveforms else np.empty((0, WINDOW_SIZE)), None
 
 
-def detect_spikes_matched_filter(data, templates, sample_rate=25000,
-                                  correlation_threshold=0.4,
-                                  min_spike_distance=30):
+# =============================================================================
+# MATCHED FILTER WITH TEMPLATE-BASED CLASSIFICATION
+# =============================================================================
+
+def detect_and_classify_matched_filter(data, templates, sample_rate=25000,
+                                        correlation_threshold=0.5,
+                                        min_spike_distance=30):
     """
-    Detect spikes using matched filtering with D1 templates.
+    Matched filter that ALSO returns which template matched best.
     
-    HOW IT WORKS:
-    1. For each known spike template, compute correlation with signal
-    2. At each point, take the maximum correlation across all templates
-    3. Find peaks in the correlation signal above threshold
-    4. Extract waveforms at those locations
+    This is the key insight: we're already computing correlations with all 5 
+    templates to detect spikes. We should USE this information for classification
+    instead of throwing it away and using a CNN trained on clean data!
     
-    WHY IT'S BETTER FOR NOISY DATA:
-    - Amplitude thresholding fails when noise amplitude ≈ spike amplitude
-    - But spikes still have a SHAPE that noise doesn't
-    - Correlation measures shape similarity, not just amplitude
-    
-    WHEN TO USE:
-    - Very noisy data: D5, D6
-    - When MAD method misses too many spikes
-    
-    Parameters:
-    -----------
-    templates : dict
-        {class_number: average_waveform} from D1 training data
-    correlation_threshold : float
-        Minimum correlation (0-1). Lower = more aggressive.
-        - 0.5-0.6: Conservative
-        - 0.3-0.4: Moderate
-        - 0.2-0.3: Aggressive
+    Returns:
+        indices: spike locations (1-indexed for MATLAB)
+        waveforms: extracted waveforms
+        template_classes: which template (1-5) matched best at each spike
+        correlations: the correlation value for each spike (confidence measure)
     """
-    # Bandpass filter
     nyquist = sample_rate / 2
     b, a = signal.butter(3, [300/nyquist, 3000/nyquist], btype='band')
-    filtered = signal.filtfilt(b, a, data)
+    filtered = signal.filtfilt(b, a, data).astype(np.float64)
     
-    # Compute correlation with each template, keep maximum
-    max_corr = np.zeros(len(data))
+    n = WINDOW_SIZE
     
+    # Precompute running statistics
+    data_mean = uniform_filter1d(filtered, size=n, mode='reflect')
+    data_sq_mean = uniform_filter1d(filtered**2, size=n, mode='reflect')
+    data_var = np.maximum(data_sq_mean - data_mean**2, 1e-10)
+    data_std = np.sqrt(data_var)
+    
+    # Store NCC for EACH template separately
+    ncc_per_template = {}
+    
+    print(f"  Computing correlations for each template...")
     for cls, template in templates.items():
-        # Filter template the same way as signal
-        template_filtered = signal.filtfilt(b, a, template)
+        template_filtered = signal.filtfilt(b, a, template).astype(np.float64)
+        t_mean = np.mean(template_filtered)
+        t_std = np.std(template_filtered)
         
-        # Normalize template (zero-mean, unit-norm)
-        template_zm = template_filtered - np.mean(template_filtered)
-        template_norm = template_zm / (np.linalg.norm(template_zm) + 1e-10)
+        if t_std < 1e-10:
+            print(f"    Warning: Template {cls} has zero variance")
+            ncc_per_template[cls] = np.zeros(len(data))
+            continue
         
-        # Compute correlation
-        raw_corr = signal.correlate(filtered, template_norm, mode='same')
+        t_zm = template_filtered - t_mean
+        xcorr = signal.correlate(filtered, t_zm, mode='same')
+        ncc = xcorr / (n * data_std * t_std + 1e-10)
+        ncc_per_template[cls] = ncc
         
-        # Normalize by local signal energy (so correlation is in 0-1 range)
-        n = len(template)
-        local_mean = uniform_filter1d(filtered, size=n, mode='reflect')
-        local_sq_mean = uniform_filter1d(filtered**2, size=n, mode='reflect')
-        local_var = np.maximum(local_sq_mean - local_mean**2, 1e-10)
-        local_std = np.sqrt(local_var)
-        
-        corr_normalized = raw_corr / (n * local_std + 1e-10)
-        max_corr = np.maximum(max_corr, corr_normalized)
+        print(f"    Template {cls}: max_corr={np.max(ncc):.3f}, "
+              f"mean={np.mean(ncc):.3f}")
     
-    print(f"  Correlation: mean={np.mean(max_corr):.3f}, max={np.max(max_corr):.3f}")
+    # Compute max NCC and WHICH template gave it
+    max_ncc = np.zeros(len(data))
+    best_template = np.zeros(len(data), dtype=int)
     
-    # Find peaks in correlation
+    for cls, ncc in ncc_per_template.items():
+        better_mask = ncc > max_ncc
+        best_template[better_mask] = cls
+        max_ncc = np.maximum(max_ncc, ncc)
+    
+    # Report statistics
+    print(f"  NCC stats: mean={np.mean(max_ncc):.3f}, max={np.max(max_ncc):.3f}, "
+          f"threshold={correlation_threshold}")
+    
+    for thresh in [0.5, 0.6, 0.7, 0.8]:
+        count = np.sum(max_ncc > thresh)
+        print(f"    Points > {thresh}: {count}")
+    
+    # Find peaks in max NCC
     peaks, _ = signal.find_peaks(
-        max_corr,
+        max_ncc,
         height=correlation_threshold,
-        distance=min_spike_distance
+        distance=min_spike_distance,
+        prominence=0.05
     )
     
-    # Extract waveforms with consistent alignment
+    print(f"  Peaks found above threshold: {len(peaks)}")
+    
+    # Extract waveforms AND the best template class at each peak
     valid_peaks = []
     waveforms = []
+    template_classes = []
+    correlations = []
     
     for peak in peaks:
-        # Refine peak location in original signal
-        search_start = max(0, peak - 10)
-        search_end = min(len(data), peak + 10)
-        actual_peak = search_start + np.argmax(data[search_start:search_end])
+        # Refine peak location
+        #search_start = max(0, peak - 15)
+        #search_end = min(len(data), peak + 15)
+        #actual_peak = search_start + np.argmax(data[search_start:search_end])
+
+        actual_peak = peak  # Use detected peak directly
         
-        # Extract with consistent alignment
         start = actual_peak - ALIGN_PEAK_AT
         end = start + WINDOW_SIZE
         
@@ -210,65 +178,34 @@ def detect_spikes_matched_filter(data, templates, sample_rate=25000,
             waveform = data[start:end]
             waveforms.append(waveform)
             valid_peaks.append(actual_peak + 1)
+            
+            # Get the best template CLASS at this location
+            # Use the correlation at the original peak location (where we detected it)
+            best_cls = best_template[peak]
+            template_classes.append(best_cls)
+            correlations.append(max_ncc[peak])
     
-    print(f"  Found {len(valid_peaks)} spikes")
-    return np.array(valid_peaks, dtype=np.int64), np.array(waveforms) if waveforms else np.empty((0, WINDOW_SIZE))
-
-
-def detect_spikes_hybrid(data, templates, sample_rate=25000,
-                         mad_factor=3.5, corr_threshold=0.35,
-                         min_spike_distance=30):
-    """
-    Hybrid detection: combine MAD and matched filter for maximum recall.
+    # Report template-based classification distribution
+    if template_classes:
+        cls_dist = Counter(template_classes)
+        print(f"  Template-based classification:")
+        for c in sorted(cls_dist.keys()):
+            print(f"    Class {c}: {cls_dist[c]} ({100*cls_dist[c]/len(template_classes):.1f}%)")
     
-    Takes the UNION of both methods - if either method finds a spike, keep it.
+    print(f"  Matched filter found {len(valid_peaks)} valid spikes")
     
-    WHEN TO USE:
-    - When you want to catch every possible spike
-    - Noisy data where different spikes respond better to different methods
-    - D5, D6 where recall is more important than precision
-    """
-    print("  Running MAD detection...")
-    indices_mad, waveforms_mad = detect_spikes_mad(
-        data, sample_rate, mad_factor, min_spike_distance
-    )
-    
-    print("  Running matched filter detection...")
-    indices_mf, waveforms_mf = detect_spikes_matched_filter(
-        data, templates, sample_rate, corr_threshold, min_spike_distance
-    )
-    
-    # Merge results (union, avoiding duplicates within refractory period)
-    all_spikes = {}
-    
-    for idx, wf in zip(indices_mad, waveforms_mad):
-        all_spikes[idx] = wf
-    
-    for idx, wf in zip(indices_mf, waveforms_mf):
-        if idx not in all_spikes:
-            # Check for nearby existing spike
-            close = [i for i in all_spikes.keys() if abs(i - idx) < min_spike_distance]
-            if not close:
-                all_spikes[idx] = wf
-    
-    # Sort by index
-    sorted_indices = sorted(all_spikes.keys())
-    final_waveforms = [all_spikes[i] for i in sorted_indices]
-    
-    print(f"  Hybrid total: {len(sorted_indices)} spikes")
-    return np.array(sorted_indices, dtype=np.int64), np.array(final_waveforms) if final_waveforms else np.empty((0, WINDOW_SIZE))
+    return (np.array(valid_peaks, dtype=np.int64), 
+            np.array(waveforms) if waveforms else np.empty((0, WINDOW_SIZE)),
+            np.array(template_classes, dtype=int) if template_classes else np.array([], dtype=int),
+            np.array(correlations) if correlations else np.array([]))
 
 
 # =============================================================================
-# TEMPLATE EXTRACTION (FIXED to use aligned waveforms)
+# TEMPLATE EXTRACTION
 # =============================================================================
 
 def extract_templates_aligned(d1_path):
-    """
-    Extract average waveform templates from D1 ground truth.
-    
-    FIXED: Uses peak-aligned extraction so templates match inference waveforms.
-    """
+    """Extract aligned templates from D1 ground truth."""
     print("Extracting aligned templates from D1...")
     
     data = sio.loadmat(d1_path)
@@ -284,130 +221,185 @@ def extract_templates_aligned(d1_path):
         
         for idx in cls_indices:
             idx_0 = int(idx) - 1
-            
-            # Find actual peak near Index
             search_start = max(0, idx_0 - 15)
             search_end = min(len(d), idx_0 + 15)
             actual_peak = search_start + np.argmax(d[search_start:search_end])
             
-            # Extract with peak at ALIGN_PEAK_AT
             start = actual_peak - ALIGN_PEAK_AT
             end = start + WINDOW_SIZE
             
             if start >= 0 and end <= len(d):
                 wf = d[start:end]
-                # Verify alignment
                 if abs(np.argmax(wf) - ALIGN_PEAK_AT) <= 3:
                     waveforms.append(wf)
         
-        waveforms = np.array(waveforms)
-        templates[cls] = np.mean(waveforms, axis=0)
-        print(f"  Class {cls}: {len(waveforms)} waveforms, peak at sample {np.argmax(templates[cls])}")
+        if waveforms:
+            waveforms = np.array(waveforms)
+            templates[cls] = np.mean(waveforms, axis=0)
+            print(f"  Class {cls}: {len(waveforms)} waveforms, "
+                  f"peak amp={np.max(templates[cls]) - np.mean(templates[cls][:5]):.2f}V")
     
     return templates
 
 
 # =============================================================================
-# CNN WRAPPER (imports from fixed version)
+# CNN LOADER
 # =============================================================================
 
-def load_fixed_cnn(model_dir):
-    """Load the fixed CNN model."""
-    from cnn_experiment_fixed import CNNExperimentFixed, DualBranchSpikeNet, ALIGN_PEAK_AT as CNN_ALIGN
-    
-    # Verify alignment matches
-    if CNN_ALIGN != ALIGN_PEAK_AT:
-        raise ValueError(f"Alignment mismatch! CNN uses {CNN_ALIGN}, submission uses {ALIGN_PEAK_AT}")
-    
+def load_cnn(model_dir):
+    """Load the trained CNN model."""
+    from cnn_experiment_fixed import CNNExperimentFixed
     cnn = CNNExperimentFixed()
     cnn.load_model()
     return cnn
 
 
+
+
 # =============================================================================
-# POST-PROCESSING (minimal - shouldn't need much with fixed alignment)
+# HYBRID CLASSIFICATION (for D5/D6)
 # =============================================================================
 
-def apply_minimal_corrections(classes, raw_amp, fwhm_values, confidences):
+def hybrid_classification(waveforms, template_classes, template_correlations, 
+                          cnn, templates, confidence_threshold=0.75):
     """
-    Apply only VERY conservative physics-based corrections.
+    Hybrid classification strategy for noisy data:
     
-    With proper alignment, the CNN should be much more accurate,
-    so we only correct obvious physical impossibilities.
+    1. If template correlation is HIGH (>0.75): trust the template match
+    2. If template correlation is MODERATE: use CNN but verify with template
+    3. Optionally weight by correlation confidence
+    
+    This combines the best of both:
+    - Template matching: direct shape comparison, works even in noise
+    - CNN: learned features that may capture subtleties
     """
-    corrected = classes.copy()
-    corrections = Counter()
+    n_spikes = len(waveforms)
+    final_classes = np.zeros(n_spikes, dtype=int)
+    classification_source = []  # Track where each classification came from
     
-    # D1 amplitude statistics (mean ± 2*std ranges):
-    # C1: 3.03 - 6.75V    C2: 4.05 - 6.97V    C3: 0.0 - 3.31V
-    # C4: 0.78 - 4.94V    C5: 2.26 - 6.14V
+    # Get CNN predictions
+    wf_norm, amp_features = cnn.prepare_data(waveforms)
+    cnn.model.eval()
     
-    for i, (pred, amp, fwhm, conf) in enumerate(zip(classes, raw_amp, fwhm_values, confidences)):
+    with torch.no_grad():
+        X_wf = torch.FloatTensor(wf_norm).to(cnn.device)
+        X_amp = torch.FloatTensor(amp_features).to(cnn.device)
+        outputs = cnn.model(X_wf, X_amp)
+        probs = torch.softmax(outputs, dim=1).cpu().numpy()
+        _, predicted = outputs.max(1)
+        cnn_classes = predicted.cpu().numpy() + 1
+        cnn_confidences = probs.max(axis=1)
+    
+    # Hybrid decision for each spike
+    for i in range(n_spikes):
+        template_cls = template_classes[i]
+        template_corr = template_correlations[i]
+        cnn_cls = cnn_classes[i]
+        cnn_conf = cnn_confidences[i]
         
-        # Rule 1: Class 3 CANNOT have amplitude > 4.5V (physically impossible)
-        if pred == 3 and amp > 4.5:
-            # Reassign based on FWHM
-            if fwhm > 0.80:
-                corrected[i] = 5
-            elif fwhm > 0.65:
-                corrected[i] = 2
+        # Decision logic
+        if template_corr >= confidence_threshold:
+            # High correlation: trust template matching
+            final_classes[i] = template_cls
+            classification_source.append('template')
+        elif template_cls == cnn_cls:
+            # Both agree: use either (they're the same)
+            final_classes[i] = template_cls
+            classification_source.append('both_agree')
+        else:
+            # Disagreement with moderate correlation
+            # Weight by confidence
+            if cnn_conf > 0.9:
+                # CNN very confident
+                final_classes[i] = cnn_cls
+                classification_source.append('cnn_confident')
+            elif template_corr > 0.6:
+                # Template correlation decent
+                final_classes[i] = template_cls
+                classification_source.append('template_moderate')
             else:
-                corrected[i] = 1
-            corrections['c3_amp_impossible'] += 1
-        
-        # Rule 2: Class 4 CANNOT have amplitude > 5.5V (physically impossible)
-        elif pred == 4 and amp > 5.5:
-            if fwhm > 0.80:
-                corrected[i] = 5
-            else:
-                corrected[i] = 2
-            corrections['c4_amp_impossible'] += 1
+                # Low confidence all around - use template (more reliable for shape)
+                final_classes[i] = template_cls
+                classification_source.append('template_default')
     
-    if sum(corrections.values()) > 0:
-        print(f"  Physics corrections: {dict(corrections)}")
+    # Report statistics
+    source_counts = Counter(classification_source)
+    print(f"  Hybrid classification sources:")
+    for source, count in sorted(source_counts.items()):
+        print(f"    {source}: {count} ({100*count/n_spikes:.1f}%)")
     
-    return corrected
+    return final_classes
 
 
 # =============================================================================
-# MAIN SUBMISSION GENERATOR
+# MAIN
 # =============================================================================
 
 def generate_submissions():
-    """Generate submissions for D2-D6."""
+    """Generate submissions with optimized strategy per dataset."""
     print("=" * 70)
-    print("GENERATING SUBMISSIONS (FIXED ALIGNMENT)")
-    print(f"Waveforms aligned with peak at sample {ALIGN_PEAK_AT}")
+    print("GENERATING SUBMISSIONS - V5 (TEMPLATE-BASED CLASSIFICATION)")
+    print("=" * 70)
+    print("\nStrategy:")
+    print("  D2/D3/D4: MAD detection + CNN classification (works well)")
+    print("  D5/D6: Matched filter + TEMPLATE-BASED classification")
+    print("         (CNN trained on clean data doesn't generalize to noisy data)")
     print("=" * 70)
     
     base_dir = Path(__file__).parent.parent
     output_dir = base_dir / 'submissions'
     output_dir.mkdir(exist_ok=True)
     
-    # Extract aligned templates for matched filter
+    # Extract templates
     templates = extract_templates_aligned(base_dir / 'datasets' / 'D1.mat')
     
-    # Save templates for future use
-    np.save(base_dir / 'models' / 'd1_templates_aligned.npy', templates)
-    
-    # Load fixed CNN
-    print("\nLoading fixed CNN model...")
+    # Load CNN (still used for D2/D3/D4)
+    print("\nLoading CNN model...")
     try:
-        cnn = load_fixed_cnn(base_dir / 'models')
-    except FileNotFoundError:
-        print("ERROR: Fixed CNN model not found!")
-        print("Please train first: python cnn_experiment_fixed.py --train")
+        cnn = load_cnn(base_dir / 'models')
+    except Exception as e:
+        print(f"ERROR loading CNN: {e}")
         return
     
-    # Dataset configurations
-    # Threshold factors tuned for each SNR level
+    # ==========================================================================
+    # DATASET CONFIGURATIONS
+    # ==========================================================================
+    
     datasets = {
-        'D2': {'method': 'mad', 'mad_factor': 3.8},   # High SNR, conservative
-        'D3': {'method': 'mad', 'mad_factor': 3.4},   # Good SNR
-        'D4': {'method': 'mad', 'mad_factor': 3.0},   # Moderate SNR
-        'D5': {'method': 'mad', 'mad_factor': 2.8},   # Low SNR, aggressive
-        'D6': {'method': 'mad', 'mad_factor': 2.6},   # Very low SNR, very aggressive
+        'D2': {
+            'method': 'mad',
+            'mad_factor': 3.5,
+            'classifier': 'cnn',
+            'apply_corrections': True,
+        },
+        'D3': {
+            'method': 'mad',
+            'mad_factor': 3.0,
+            'classifier': 'cnn',
+            'apply_corrections': True,
+        },
+        'D4': {
+            'method': 'mad',
+            'mad_factor': 3.0,
+            'classifier': 'cnn',
+            'apply_corrections': False,
+        },
+        'D5': {
+            'method': 'matched',
+            'corr_threshold': 0.73,      # Adjusted threshold
+            'classifier': 'cnn',     
+            'apply_corrections': False,
+        },
+        'D6': {
+            'method': 'matched',
+            'corr_threshold': 0.69,      # Lower for very noisy data
+            'classifier': 'cnn',     
+            'apply_corrections': False,
+        },
     }
+    
+    # Alternative: try hybrid classification
+    # Change 'classifier': 'template' to 'classifier': 'hybrid' to test
     
     all_results = {}
     
@@ -420,60 +412,80 @@ def generate_submissions():
         data = sio.loadmat(base_dir / 'datasets' / f'{dataset_name}.mat')
         d = data['d'].flatten()
         
-        # Detect spikes
         method = config['method']
-        print(f"Detection method: {method}")
+        classifier = config['classifier']
+        print(f"Detection: {method}, Classification: {classifier}")
         
+        # ===== DETECTION =====
         if method == 'mad':
-            indices, waveforms = detect_spikes_mad(d, threshold_factor=config['mad_factor'])
-        elif method == 'hybrid':
-            indices, waveforms = detect_spikes_hybrid(
-                d, templates, 
-                mad_factor=config.get('mad_factor', 3.5),
-                corr_threshold=config.get('corr_threshold', 0.35)
+            indices, waveforms, _ = detect_spikes_mad(
+                d, threshold_factor=config['mad_factor']
             )
+            template_classes = None
+            template_correlations = None
+            
         elif method == 'matched':
-            indices, waveforms = detect_spikes_matched_filter(
-                d, templates,
-                correlation_threshold=config.get('corr_threshold', 0.4)
-            )
+            indices, waveforms, template_classes, template_correlations = \
+                detect_and_classify_matched_filter(
+                    d, templates, 
+                    correlation_threshold=config['corr_threshold']
+                )
         
         if len(indices) == 0:
             print(f"WARNING: No spikes detected!")
-            all_results[dataset_name] = {'count': 0, 'distribution': {}}
+            all_results[dataset_name] = {'count': 0}
             continue
         
         # Verify alignment
         peak_positions = [np.argmax(wf) for wf in waveforms[:100]]
-        print(f"Peak positions (sample): mean={np.mean(peak_positions):.1f}, std={np.std(peak_positions):.1f}")
+        print(f"Peak alignment: mean={np.mean(peak_positions):.1f}, std={np.std(peak_positions):.1f}")
         
-        # Classify with CNN
-        print("Classifying...")
-        wf_norm, amp_features = cnn.prepare_data(waveforms)
-        raw_amp_features = cnn.extract_amplitude_features(waveforms)
-        raw_amp = raw_amp_features[:, 0]
-        fwhm_values = raw_amp_features[:, 3]
+        # ===== CLASSIFICATION =====
+        print(f"Classifying with {classifier}...")
         
-        cnn.model.eval()
-        X_wf = torch.FloatTensor(wf_norm).to(cnn.device)
-        X_amp = torch.FloatTensor(amp_features).to(cnn.device)
+        if classifier == 'cnn':
+            # Use Shape-Only CNN
+            # We NO LONGER calculate amp_features
+            
+            
+            # Prepare ONLY waveform data
+            wf_norm, _ = cnn.prepare_data(waveforms) # Ignore the second return value
+            
+            cnn.model.eval()
+            with torch.no_grad():
+                X_wf = torch.FloatTensor(wf_norm).to(cnn.device)
+                
+                # Model now only takes X_wf
+                outputs = cnn.model(X_wf)
+                
+                probs = torch.softmax(outputs, dim=1).cpu().numpy()
+                _, predicted = outputs.max(1)
+                classes = predicted.cpu().numpy() + 1
+                confidences = probs.max(axis=1)
+            
+
+
+        elif classifier == 'template':
+            # Use template-based classification (for D5/D6)
+            classes = template_classes
+            confidences = template_correlations
+            
+        elif classifier == 'hybrid':
+            # Combine template and CNN
+            classes = hybrid_classification(
+                waveforms, template_classes, template_correlations,
+                cnn, templates, confidence_threshold=0.70
+            )
+            confidences = template_correlations
         
-        with torch.no_grad():
-            outputs = cnn.model(X_wf, X_amp)
-            probs = torch.softmax(outputs, dim=1).cpu().numpy()
-            _, predicted = outputs.max(1)
-            classes = predicted.cpu().numpy() + 1
-            confidences = probs.max(axis=1)
-        
-        # Apply minimal corrections (should be few with fixed alignment)
-        classes = apply_minimal_corrections(classes, raw_amp, fwhm_values, confidences)
-        
-        # Print distribution
+        # Print results
         class_dist = Counter(classes)
         print("Class distribution:")
         for c in sorted(class_dist.keys()):
             print(f"  Class {c}: {class_dist[c]} ({100*class_dist[c]/len(classes):.1f}%)")
-        print(f"Average confidence: {np.mean(confidences):.1%}")
+        
+        if confidences is not None:
+            print(f"Average confidence: {np.mean(confidences):.3f}")
         
         # Save
         output_path = output_dir / f'{dataset_name}.mat'
@@ -485,28 +497,29 @@ def generate_submissions():
         
         all_results[dataset_name] = {
             'count': len(indices),
-            'distribution': class_dist
+            'distribution': class_dist,
         }
     
-    # Print summary
+    # Summary
     print("\n" + "=" * 70)
     print("SUMMARY")
     print("=" * 70)
     
-    print(f"\n{'Dataset':<8} {'Count':<8} {'C1':<8} {'C2':<8} {'C3':<8} {'C4':<8} {'C5':<8}")
-    print("-" * 60)
+    friend = {'D2': 3728, 'D3': 3016, 'D4': 2598, 'D5': 1898, 'D6': 2582}
+    
+    print(f"\n{'Dataset':<8} {'Count':<8} {'Friend':<8} {'C1':>6} {'C2':>6} {'C3':>6} {'C4':>6} {'C5':>6}")
+    print("-" * 65)
     
     for ds in ['D2', 'D3', 'D4', 'D5', 'D6']:
         if ds in all_results and all_results[ds]['count'] > 0:
             count = all_results[ds]['count']
             dist = all_results[ds]['distribution']
-            row = f"{ds:<8} {count:<8}"
-            for c in range(1, 6):
-                pct = 100 * dist.get(c, 0) / count
-                row += f"{pct:.1f}%{'':<3}"
-            print(row)
-    
-    print("\nSubmissions saved to:", output_dir)
+            c1 = dist.get(1, 0)
+            c2 = dist.get(2, 0)
+            c3 = dist.get(3, 0)
+            c4 = dist.get(4, 0)
+            c5 = dist.get(5, 0)
+            print(f"{ds:<8} {count:<8} {friend[ds]:<8} {c1:>6} {c2:>6} {c3:>6} {c4:>6} {c5:>6}")
 
 
 if __name__ == '__main__':

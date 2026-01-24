@@ -20,8 +20,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from cnn_experiment import CNNExperiment
-from generate_submissions_v2 import detect_spikes_mad
+from deprecated.cnn_experiment import CNNExperiment
+from deprecated.generate_submissions_v2 import detect_spikes_mad
 
 # Setup paths
 BASE_DIR = Path(__file__).parent.parent

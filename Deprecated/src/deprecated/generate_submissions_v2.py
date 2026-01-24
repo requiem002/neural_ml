@@ -25,7 +25,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from cnn_experiment import CNNExperiment
+from deprecated.cnn_experiment import CNNExperiment
 
 
 def detect_spikes_mad(data, sample_rate=25000, threshold_factor=4.0,

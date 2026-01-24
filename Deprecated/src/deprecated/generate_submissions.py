@@ -28,7 +28,7 @@ import sys
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from cnn_experiment import CNNExperiment
+from deprecated.cnn_experiment import CNNExperiment
 
 
 def generate_submissions():

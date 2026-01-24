@@ -26,7 +26,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from spike_detector import detect_spikes
-from feature_extractor import extract_waveforms_at_indices
+from deprecated.feature_extractor import extract_waveforms_at_indices
 
 
 def load_d1_data():
@@ -240,7 +240,7 @@ def test_cnn_on_d1():
 
     # We need to import the CNN experiment module
     sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
-    from cnn_experiment import CNNExperiment
+    from deprecated.cnn_experiment import CNNExperiment
 
     experiment = CNNExperiment()
     experiment.load_model()
