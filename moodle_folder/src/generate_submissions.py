@@ -248,7 +248,7 @@ def extract_templates_aligned(d1_path):
 
 def load_cnn(model_dir):
     """Load the trained CNN model."""
-    from cnn_experiment_fixed import CNNExperimentFixed
+    from train_model import CNNExperimentFixed
     cnn = CNNExperimentFixed()
     cnn.load_model()
     return cnn
